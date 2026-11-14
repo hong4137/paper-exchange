@@ -2,6 +2,7 @@ name: order-window
 # 주문 창구: 운용자가 inbox/ 에 주문 요청을 올리면 바로 접수한다. 접수 시각 = 이 실행이 도는 시각.
 on:
   push:
+    branches: [main]
     paths:
       - 'inbox/**'
 

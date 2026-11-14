@@ -45,6 +45,19 @@ def live(code):
     return f"{d.get('stockName')} {d.get('closePrice')} · 시간외 {(d.get('overMarketPriceInfo') or {}).get('tradingSessionType')}"
 
 
+def events(label_fn):
+    ev = label_fn()
+    dv, sp = ev["dividends"], ev["splits"]
+    last = max(dv) if dv else None
+    return (f"배당 {len(dv)}건" + (f" (마지막 {last} 주당 {dv[last]})" if last else "")
+            + f", 분할 {len(sp)}건" + (f" {sorted(sp.items())[-1]}" if sp else ""))
+
+
+def kind(code):
+    c = px.load(home, code) or px.update(home, code, now)
+    return f"{c['name']} → {c.get('kind')} ({c.get('kind_src')}), 배당·분할 자료: {c.get('events_note')}"
+
+
 print(f"시각 {now:%Y-%m-%d %H:%M} (한국)")
 print("하루 시세")
 probe("야후 미국 종목 (MU)", lambda: daily("MU"))
@@ -56,5 +69,14 @@ probe("야후 환율", lambda: minutes(px.FX_KEY))
 probe("네이버 한국 종목, 장후 포함 (005930)", lambda: minutes("005930"))
 print("실시간 값 (장전 수집용)")
 probe("네이버 실시간 (005930)", lambda: live("005930"))
+print("배당·액면분할 (야후 events)")
+probe("미국 종목 (AAPL, 5년)", lambda: events(lambda: px.fetch_yahoo_events("AAPL", "5y")))
+probe("미국 종목 분할 (NVDA, 5년)", lambda: events(lambda: px.fetch_yahoo_events("NVDA", "5y")))
+probe("한국 코스피 종목 (005930)", lambda: events(lambda: px.fetch_kr_events("005930")))
+probe("한국 코스닥 종목 (247540)", lambda: events(lambda: px.fetch_kr_events("247540")))
+probe("한국 ETF 분배금 (069500)", lambda: events(lambda: px.fetch_kr_events("069500")))
+print("한국 종목이 ETF 인지 (매도 거래세가 다르다)")
+probe("주식 (005930)", lambda: kind("005930"))
+probe("ETF (069500)", lambda: kind("069500"))
 print("\n전부 열림" if not fails else f"\n막힌 곳 {fails}군데")
 sys.exit(1 if fails else 0)

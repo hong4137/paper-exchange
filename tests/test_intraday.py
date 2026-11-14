@@ -17,6 +17,16 @@ KST = timezone(timedelta(hours=9))
 tmp = Path(tempfile.mkdtemp(prefix="paper_intra_"))
 shutil.copy(ROOT / "config.json", tmp / "config.json")
 
+# 시험용 요율 — 실제 config.json 의 값이 바뀌어도 이 시험의 기대값은 그대로다 (2026-11-14 에 정한 값과 같다)
+FEES = {"KR": {"commission_rate": 0.00015, "exchange_fee_rate": 0.000036396, "sell_tax_rate": 0.002},
+        "US": {"commission_rate": 0.0025, "sec_fee_rate": 0.0000206, "sec_fee_from": "2026-04-04",
+               "taf_per_share": 0.000195, "taf_max": 9.79},
+        "fx_spread_rate": 0.002, "dividend_tax": {"KR": 0.154, "US": 0.15},
+        "us_gains_tax": {"rate": 0.22, "deduction_krw": 2500000}}
+_cfg = json.loads((tmp / "config.json").read_text(encoding="utf-8"))
+_cfg.update({"fees": FEES, "usd_shortfall": "auto"})
+(tmp / "config.json").write_text(json.dumps(_cfg, ensure_ascii=False), encoding="utf-8")
+
 
 def ts(s):
     return int(datetime.fromisoformat(s).replace(tzinfo=KST).timestamp())
@@ -145,11 +155,21 @@ check("보유 종목에 시간외 가격이 따로 붙는다 (장후 97, 종가 
 check("총자산은 정규장 종가로, 시간외 변동은 따로", st["summary"]["ext_delta_krw"] == round(30 * 97 * 1400) - round(30 * 100 * 1300),
       str(st["summary"]["ext_delta_krw"]))
 check("보유: 000002 는 다 팔렸고 000003·BBB·CCC", sorted(p["symbol"] for p in st["positions"]) == ["000003", "BBB", "CCC"], str([p["symbol"] for p in st["positions"]]))
-cash = 50000000
+krw, usd = 50000000, 0.0
 for x in st["orders"]:
     for f in x.get("fills", []):
-        cash += f["cash_delta"]
-check("현금 = 시작 금액 + 체결 조각들의 합", st["summary"]["cash"] == cash, f"{st['summary']['cash']} vs {cash}")
+        if f["ccy"] == "USD":
+            usd += f["delta"]
+        else:
+            krw += f["delta"]
+led = [json.loads(l) for l in (tmp / "ledger" / "ledger.jsonl").read_text(encoding="utf-8").splitlines()]
+for e in led:
+    if e["type"] == "fx":                                  # 미국 주식을 살 때 모자란 달러를 자동 환전한 줄
+        krw -= e["data"]["krw"]
+        usd += e["data"]["usd"]
+check("원화 예수금 = 시작 금액 + 한국 체결 + 환전으로 나간 원화", st["summary"]["cash_krw"] == krw, f"{st['summary']['cash_krw']} vs {krw}")
+check("달러 예수금 = 환전으로 들어온 달러 - 미국 주식 산 값 (남는 것 없음)", abs(usd) < 0.005 and st["summary"]["cash_usd"] == 0, f"{usd}")
+check("자동 환전은 달러가 모자랐던 미국 매수 체결마다 한 번 (BBB, CCC)", sum(e["type"] == "fx" for e in led) == 2, str(sum(e["type"] == "fx" for e in led)))
 check("장부 지문 이상 없음", st["integrity"]["ok"])
 
 shutil.rmtree(tmp, ignore_errors=True)

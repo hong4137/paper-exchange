@@ -6,6 +6,7 @@ on:
     - cron: '7 * * * *'        # 매시 7분 (GitHub 예약은 몇 분~몇십 분 늦을 수 있다)
   workflow_dispatch:
   push:
+    branches: [main]         # 장부는 main 에만 있다 — 작업 가지에 올린 것으로는 돌지 않는다
     paths:
       - 'broker/**'
       - 'config.json'
