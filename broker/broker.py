@@ -75,15 +75,17 @@ def config():
 
 # ---------- 계좌 (참가자) ----------
 def accounts(cfg=None):
-    """참가자 계좌 목록. 명단(players)이 없으면 주인 계좌 하나. 계정 이름은 파일 이름이 되므로 GitHub 계정 글자만 받는다."""
+    """참가자 계좌 목록. 명단(players)이 없으면 주인 계좌 하나.
+    계좌 이름표(id)는 명단의 id, 없으면 GitHub 계정 이름(소문자). 파일 이름이 되므로 영문·숫자·줄표만 받는다.
+    GitHub 계정이 없는 참가자(이메일로 로그인하는 사람)는 id 만 있어도 된다 — 주문 이슈는 못 쓰고 로그인한 화면으로 주문한다."""
     cfg = cfg or config()
     out = []
     for p in cfg.get("players") or []:
-        gh = str(p.get("github") or "").strip()
-        aid = gh.lower()
+        gh = str(p.get("github") or "").strip() or None
+        aid = str(p.get("id") or gh or "").strip().lower()
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,38}", aid) or any(x["id"] == aid for x in out):
             continue
-        out.append({"id": aid, "github": gh, "name": str(p.get("name") or gh), "agent": p.get("agent"),
+        out.append({"id": aid, "github": gh, "name": str(p.get("name") or gh or aid), "agent": p.get("agent"),
                     "main": bool(p.get("main")) and not any(x["main"] for x in out)})
     if not any(x["main"] for x in out):                 # 예전 장부(주인 계좌)는 언제나 남는다
         out.insert(0, {"id": "main", "github": None, "name": cfg["account_name"], "agent": None, "main": True})
@@ -1239,25 +1241,36 @@ def admin_do(cfg, req):
     league = cfg.setdefault("league", {})
     if act in ("add_player", "remove_player"):
         gh = str(req.get("github") or "").strip().lstrip("@")
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}", gh):
-            raise Refused("GitHub 계정 이름이 올바르지 않습니다")
-        cur = next((p for p in players if str(p.get("github", "")).lower() == gh.lower()), None)
+        pid = str(req.get("id") or gh).strip().lower()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,38}", pid) or (gh and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}", gh)):
+            raise Refused("계정 이름이 올바르지 않습니다 (영문·숫자·줄표)")
+        key = lambda p: str(p.get("id") or p.get("github") or "").lower()
+        cur = next((p for p in players if key(p) == pid), None)
         if act == "add_player":
-            name = str(req.get("name") or gh).strip()[:40]
+            name = str(req.get("name") or (cur or {}).get("name") or gh or pid).strip()[:40]
             agent = str(req.get("agent") or "").strip()[:60] or None
-            if cur:                                       # 이미 있으면 이름·에이전트만 고친다
+            email = str(req.get("email") or "").strip().lower()[:120] or None
+            if email and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+                raise Refused("이메일이 올바르지 않습니다")
+            if email and any(str(p.get("email") or "").lower() == email and p is not cur for p in players):
+                raise Refused("그 이메일은 이미 다른 계좌에 쓰이고 있습니다")
+            if cur:                                       # 이미 있으면 이름·에이전트·이메일만 고친다
                 cur["name"] = name
-                if agent:
-                    cur["agent"] = agent
-                return f"`{gh}` 의 이름을 '{name}'(으)로 고쳤습니다"
-            players.append({k: v for k, v in (("github", gh), ("name", name), ("agent", agent)) if v})
-            return f"`{gh}` 을(를) '{name}'(으)로 명단에 넣었습니다. 계좌가 시작 금액 {cfg['initial_cash']:,}원으로 열립니다"
+                for k, v in (("agent", agent), ("email", email), ("github", gh or None)):
+                    if v:
+                        cur[k] = v
+                return f"`{pid}` 의 정보를 고쳤습니다 (이름 '{name}')"
+            new = {"id": pid, "github": gh or None, "email": email, "name": name, "agent": agent}
+            if gh and gh.lower() == pid:
+                new.pop("id")
+            players.append({k: v for k, v in new.items() if v})
+            return f"`{pid}` 을(를) '{name}'(으)로 명단에 넣었습니다. 계좌가 시작 금액 {cfg['initial_cash']:,}원으로 열립니다"
         if not cur:
-            raise Refused(f"`{gh}` 은(는) 명단에 없습니다")
+            raise Refused(f"`{pid}` 은(는) 명단에 없습니다")
         if cur.get("main"):
             raise Refused("주인 계좌는 뺄 수 없습니다")
         players.remove(cur)
-        return f"`{gh}` 을(를) 명단에서 뺐습니다. 장부는 그대로 남고, 더 이상 주문을 받지 않으며 전체 수익률 표에서 빠집니다"
+        return f"`{pid}` 을(를) 명단에서 뺐습니다. 장부는 그대로 남고, 더 이상 주문을 받지 않으며 전체 수익률 표에서 빠집니다"
     if act in ("add_contest", "remove_contest"):
         name = str(req.get("name") or "").strip()[:40]
         if not name:
@@ -1305,7 +1318,7 @@ def cmd_admin_issue(author, body):
     if changed:
         _save_config(cfg)
         open_missing()
-    roster = ", ".join(f"{x['name']}(`{x['github'] or '주인'}`)" for x in accounts())
+    roster = ", ".join(f"{x['name']}(`{x['id']}`)" for x in accounts())
     return lines + ["", f"지금 명단: {roster}"]
 
 

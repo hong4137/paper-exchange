@@ -143,6 +143,14 @@ r = issue(MON, "Owner-Kim", 33, [{"action": "remove_player", "github": "carol"},
 c3 = json.loads((tmp / "config.json").read_text(encoding="utf-8"))
 check("참가자를 빼면 명단에서 빠지고 장부는 남는다", "명단에서 뺐습니다" in r and not any(str(p.get("github")).lower() == "carol" for p in c3["players"])
       and len(ledger("carol")) == 2 and not any(c["name"] == "새 대회" for c in c3["league"]["contests"]), r)
+r = issue(MON, "owner-kim", 35, [{"action": "add_player", "id": "Dave-1", "email": "Dave@Example.com", "name": "데이브"},
+                                  {"action": "add_player", "id": "erin", "email": "dave@example.com"},
+                                  {"action": "add_player", "id": "frank", "email": "이메일아님"}], title="[관리] 이메일")
+c4 = json.loads((tmp / "config.json").read_text(encoding="utf-8"))
+check("GitHub 계정 없이 이름표와 이메일만으로도 참가자를 넣는다 (로그인한 화면으로 주문하는 사람)",
+      {"id": "dave-1", "email": "dave@example.com", "name": "데이브"} in c4["players"] and ledger("dave-1")[0]["type"] == "open", r)
+check("같은 이메일을 두 계좌에 쓰거나 이메일이 아닌 값은 넣지 않는다", r.count("하지 않았습니다") == 2 and not (tmp / "accounts" / "erin").exists(), r)
+issue(MON, "owner-kim", 36, {"action": "remove_player", "id": "dave-1"}, title="[관리] 빼기")
 r = issue(MON, "carol", 34, {"symbol": "000010", "side": "buy", "qty": 1})
 check("빠진 사람의 주문은 받지 않는다", "명단에 없어" in r and len(ledger("carol")) == 2, r)
 

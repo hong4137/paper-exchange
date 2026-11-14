@@ -7,6 +7,8 @@ on:
     paths:
       - 'broker/**'
       - 'tests/**'
+      - 'site/**'
+      - 'functions/**'
       - '.github/workflows/probe.yml'
 
 permissions:
@@ -26,5 +28,6 @@ jobs:
           python tests/test_intraday.py
           python tests/test_money.py
           python tests/test_league.py
+          node tests/test_site.mjs
       - name: 시세 원천 열리는지
         run: python tests/probe_sources.py

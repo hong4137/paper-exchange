@@ -168,6 +168,17 @@ footer{margin:40px 0 50px; padding-top:16px; border-top:1px solid var(--line); c
   th,td{padding:9px 10px; font-size:13px}
   .league .c3{display:none}
 }
+
+/* 주문·관리 양식 (로그인 있는 화면에서만 나온다) */
+.form{background:var(--ink2); border:1px solid var(--line); border-radius:14px; padding:16px 18px}
+.form .row{display:flex; flex-wrap:wrap; gap:10px 14px; align-items:flex-end}
+.form label{display:grid; gap:4px; font-size:12.5px; color:var(--dim)}
+.form input,.form select{font:inherit; font-size:14.5px; color:var(--txt); background:var(--ink); border:1px solid var(--line); border-radius:10px; padding:8px 10px; min-width:0; width:150px}
+.form label.chk{display:flex; align-items:center; gap:6px; padding-bottom:9px} .form label.chk input{width:auto}
+.form button,.btn{font:inherit; font-size:14.5px; font-weight:700; color:var(--ink); background:var(--txt); border:0; border-radius:10px; padding:9px 18px; cursor:pointer}
+.form button:disabled{opacity:.5; cursor:default}
+.form .msg{margin:10px 0 0; font-size:13.5px; color:var(--dim); min-height:1.3em} .form .msg.ok{color:var(--ok)} .form .msg.bad{color:var(--up)}
+.slip .cancel{margin-top:10px; font:inherit; font-size:12.5px; background:transparent; border:1px solid #9aa3b8; color:#333d55; border-radius:99px; padding:4px 12px; cursor:pointer}
 </style>
 </head>
 <body>
@@ -181,6 +192,7 @@ footer{margin:40px 0 50px; padding-top:16px; border-top:1px solid var(--line); c
     <span class="tag" id="upd">불러오는 중</span>
   </header>
   <main id="app"><p class="empty" style="margin-top:20px">장부를 불러오는 중입니다.</p></main>
+  <div id="orderbox"></div>
   <footer id="foot"></footer>
 </div>
 
@@ -194,8 +206,66 @@ const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&g
 const when=ts=>{const d=new Date(ts);return d.toLocaleString('ko-KR',{month:'numeric',day:'numeric',weekday:'short',hour:'2-digit',minute:'2-digit',hour12:false,timeZone:'Asia/Seoul'})};
 const KIND={weekly:'주간 보고',monthly:'월간 보고',special:'임시 보고'};
 const STATUS={filled:'체결',partial:'일부',pending:'대기',rejected:'거부',expired:'만료',canceled:'취소'};
-let S=null, filter='all', feedAll=false;
-const ACC=(new URLSearchParams(location.search).get('a')||'').toLowerCase().replace(/[^a-z0-9-]/g,'');
+let S=null, ME=null, meAsked=false, filter='all', feedAll=false;
+let ACC=(new URLSearchParams(location.search).get('a')||'').toLowerCase().replace(/[^a-z0-9-]/g,'');
+const mine=()=>!!(ME&&ME.id&&S&&S.player&&S.player.id===ME.id);
+async function post(path, body){
+  try{
+    const r=await fetch(path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+    const j=await r.json().catch(()=>({}));
+    return {ok:r.ok, text:j.message||j.error||(r.ok?'보냈습니다.':'보내지 못했습니다.')};
+  }catch(e){ return {ok:false, text:'보내지 못했습니다. 잠시 뒤 다시 해 주세요.'}; }
+}
+async function whoAmI(){
+  try{ const r=await fetch('api/me',{cache:'no-store'}); if(!r.ok) return null; const j=await r.json(); return j&&(j.id||j.admin)?j:null; }catch(e){ return null; }
+}
+
+// 주문 양식 — 로그인한 사람이 자기 계좌를 볼 때만. 화면이 5분마다 다시 그려져도 쓰던 내용이 지워지지 않게 따로 둔다.
+function orderForm(){
+  const box=$('#orderbox');
+  if(!mine()){ box.innerHTML=''; return; }
+  if(box.dataset.for===ME.id) return;
+  box.dataset.for=ME.id;
+  box.innerHTML=`<section><h2>주문 내기</h2><p class="sub">${esc(ME.name||'')} 계좌로 주문합니다. 거래소가 받은 시각이 접수 시각이고, 1~2분 뒤 전표에 나타납니다.</p>
+    <form class="form" id="of"><div class="row">
+      <label>무엇을<select name="what"><option value="buy">주식 사기</option><option value="sell">주식 팔기</option><option value="fxbuy">달러 사기 (환전)</option><option value="fxsell">달러 팔기 (환전)</option></select></label>
+      <label class="st">종목<input name="symbol" placeholder="005930 또는 MU" autocomplete="off"></label>
+      <label class="st">방식<select name="type"><option value="market">시장가</option><option value="moc">그날 종가</option><option value="limit">지정가</option><option value="stop">손절</option></select></label>
+      <label>얼마나<select name="unit"></select></label>
+      <label class="amt">수량·금액<input name="amount" inputmode="decimal" autocomplete="off"></label>
+      <label class="px">값<input name="price" inputmode="decimal" autocomplete="off"></label>
+      <label class="chk ext"><input type="checkbox" name="ext"> 시간외 포함</label>
+      <button type="submit">주문 보내기</button>
+    </div><p class="msg" id="om"></p></form></section>`;
+  const f=$('#of'), q=n=>f.elements[n];
+  const sync=()=>{
+    const w=q('what').value, fx=w.startsWith('fx'), keep=q('unit').value;
+    const units=w==='buy'?[['qty','주 수'],['krw','원화 금액']]:w==='sell'?[['qty','주 수'],['all','전부']]:w==='fxbuy'?[['krw','원화 금액'],['usd','달러 금액']]:[['usd','달러 금액'],['all','전부']];
+    q('unit').innerHTML=units.map(([v,l])=>`<option value="${v}">${l}</option>`).join('');
+    if(units.some(([v])=>v===keep)) q('unit').value=keep;
+    f.querySelectorAll('.st').forEach(e=>e.style.display=fx?'none':'');
+    const t=q('type').value;
+    f.querySelector('.px').style.display=!fx&&(t==='limit'||t==='stop')?'':'none';
+    f.querySelector('.ext').style.display=!fx&&t==='limit'?'':'none';
+    f.querySelector('.amt').style.display=q('unit').value==='all'?'none':'';
+  };
+  ['what','type','unit'].forEach(n=>q(n).onchange=sync); sync();
+  f.onsubmit=async e=>{
+    e.preventDefault();
+    const w=q('what').value, fx=w.startsWith('fx'), u=q('unit').value, n=Number(String(q('amount').value).replace(/,/g,'')), msg=$('#om');
+    const say=(t,c)=>{msg.textContent=t; msg.className='msg '+(c||'');};
+    const o={side:w==='buy'||w==='fxbuy'?'buy':'sell'};
+    if(fx) o.symbol='USD'; else{ o.symbol=q('symbol').value.trim().toUpperCase(); o.type=q('type').value; if(!o.symbol) return say('종목을 적어 주세요.','bad'); }
+    if(u==='all'){ if(fx) o.usd='all'; else o.qty='all'; }
+    else{ if(!(n>0)) return say('수량이나 금액을 적어 주세요.','bad'); o[u]=n; }
+    if(!fx&&(o.type==='limit'||o.type==='stop')){ const pr=Number(String(q('price').value).replace(/,/g,'')); if(!(pr>0)) return say('값을 적어 주세요.','bad'); o.price=pr; }
+    if(!fx&&o.type==='limit'&&q('ext').checked) o.session='all';
+    const b=f.querySelector('button'); b.disabled=true; say('보내는 중입니다.');
+    const r=await post('api/order',o); b.disabled=false; say(r.text,r.ok?'ok':'bad');
+    if(r.ok){ q('amount').value=''; q('price').value=''; setTimeout(load,90*1000); }
+  };
+}
+
 
 const pp=n=>(n==null?'—':(n>0?'+':'')+n.toFixed(2)+'%p');
 function perfSection(){
@@ -290,6 +360,7 @@ function slip(o){
     <div class="ttl"><span class="side ${o.side}">${buy?'사기':'팔기'}</span> ${esc(o.name)}</div>
     <div class="hd"><span class="num">${o.symbol} · ${US?'미국 · 달러로 거래':'한국'}</span></div>
     <dl>${rows}</dl>
+    ${mine()&&(o.status==='pending'||o.status==='partial')?`<button class="cancel" data-o="${o.id}">이 주문 취소하기</button>`:''}
   </article>`;
 }
 
@@ -389,10 +460,18 @@ function render(){
     +(F&&F.KR&&F.US&&F.KR.sell_tax_rate!=null?`<br>적용 요율 — 한국 주식: 수수료 <span class="num">${rate(F.KR.commission_rate+(F.KR.exchange_fee_rate||0))}</span>, 팔 때 거래세 <span class="num">${rate(F.KR.sell_tax_rate)}</span>(ETF 없음) · 미국 주식: 수수료 <span class="num">${rate(F.US.commission_rate)}</span>, 팔 때 제비용 약 <span class="num">${rate(F.US.sec_fee_rate||0)}</span> · 환전 <span class="num">${rate(F.fx_spread_rate||0)}</span> · 배당 세금 한국 <span class="num">${rate(F.dividend_tax.KR)}</span>, 미국 <span class="num">${rate(F.dividend_tax.US)}</span>. 수수료와 환전 비용은 증권사마다 달라 가정한 값입니다.`:'');
   document.querySelectorAll('.chip').forEach(b=>b.onclick=()=>{filter=b.dataset.f;render()});
   const m=$('#more'); if(m) m.onclick=()=>{feedAll=true;render()};
+  document.querySelectorAll('.slip .cancel').forEach(b=>b.onclick=async()=>{
+    b.disabled=true; b.textContent='취소 요청을 보내는 중';
+    const r=await post('api/order',{action:'cancel',order:b.dataset.o,why:'화면에서 취소'});
+    b.textContent=r.ok?'취소 요청을 보냈습니다 (1~2분 뒤 반영)':r.text; if(r.ok) setTimeout(load,90*1000);
+  });
+  orderForm();
+  if(ME&&ME.admin&&!$('#adminlink')){ const a=document.createElement('a'); a.id='adminlink'; a.className='tag'; a.href='admin.html'; a.textContent='관리자 화면'; $('header.top').appendChild(a); }
 }
 
 async function load(){
   const demo=new URLSearchParams(location.search).has('demo');
+  if(!meAsked&&!demo){ meAsked=true; ME=await whoAmI(); if(ME&&ME.id&&!ACC) ACC=ME.id; }   // 로그인 있는 화면이면 내 계좌부터
   if(demo) $('#demo').innerHTML='<div class="demo">시험용 가짜 자료입니다 — 화면이 어떻게 채워지는지 보는 용도</div>';
   try{
     const r=await fetch(`data/${demo?'demo':ACC?'accounts/'+ACC:'state'}.json?t=${Date.now()}`,{cache:'no-store'});

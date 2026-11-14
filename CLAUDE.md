@@ -53,7 +53,11 @@ data/live_raw/        장전 수집기가 읽은 원본
 docs/index.html       거래소 화면 — 계좌 하나 (성적·잔고·전표·흐름). `?a=계정` 이면 그 참가자, 없으면 주인 계좌(docs/data/state.json). 다른 계좌나 순위는 여기 나오지 않는다
 docs/admin.html       관리자 화면 — 모든 계좌의 수익률을 한 표로 (docs/data/league.json 을 읽는다). 거래소 화면에서 오는 길은 없다
 docs/data/league.json 전체 계좌 수익률(기간별·대회) / docs/data/accounts/{계정}.json 계좌별 화면 자료 (주인 계좌도 한 벌 들어 있다)
-참가-안내.md          초대받은 사람이 읽는 글 — 주문 이슈 쓰는 법
+참가-안내.md          초대받은 사람이 읽는 글 — 주문하는 법
+운영-안내.md          거래소 주인이 읽는 글 — 로그인 있는 곳(Cloudflare)으로 옮기고 저장소를 비공개로 돌리는 순서
+functions/_middleware.js  로그인 있는 화면의 문지기 (Cloudflare Pages 가 모든 요청 앞에서 부른다) — 하는 일은 site/lib.mjs
+site/lib.mjs          문지기: 로그인 확인, 자기 계좌 자료만 내주기, 주문 양식 → inbox/{이름표}/, 관리 양식 → [관리] 이슈
+tests/test_site.mjs   문지기 시험 (가짜 로그인 열쇠·가짜 저장소, node 로 돈다)
 docs/data/demo.json   화면 확인용 자료 (index.html?demo). tests/make_demo_real.py 로 다시 만든다
 tests/test_broker.py  장부·종가 주문·산 주문별 손익 시험 — 임시 폴더·가짜 가격으로만 돈다
 tests/test_intraday.py 1분 체결 시험 (시장가·지정가·손절·거래량 한도·이어 체결·호가 단위·환율·시간외)
@@ -91,7 +95,7 @@ inbox/                주문 창구 — 운용자가 올린 주문 요청 파일
   입출금 기능을 넣게 되면 이 계산을 고쳐야 한다(돈이 드나든 날을 끊어서 재야 한다).
 - **대회**: `config.json` 의 `league.contests` 에 `{"name", "start", "end"}` 를 적으면(지금은 비어 있다) 같은 자산 곡선에서 그 기간의 수익률과 순위를 따로 낸다(`league.json` 의 `contests`).
   계좌를 새로 열거나 되돌리지 않는다. 기준은 시작 전날의 총자산. 시작 뒤에 연 계좌는 시작 금액을 기준으로 재고 "늦게 들어옴"으로 표시한다. 끝난 뒤에도 주문을 막지 않는다 — 순위만 그 기간으로 고정된다.
-- **명단**: `config.json` 의 `players` — `{"github": 계정, "name": 화면에 나올 이름, "agent": 어떤 에이전트인지(없어도 됨), "main": 주인 계좌면 true}`.
+- **명단**: `config.json` 의 `players` — `{"github": 계정, "id": 이름표(없으면 GitHub 계정 소문자), "email": 로그인 이메일, "name": 화면에 나올 이름, "agent": 어떤 에이전트인지, "main": 주인 계좌면 true}`. `github` 나 `id` 중 하나는 있어야 한다.
   명단에 넣으면 다음 실행(정기 실행이나 그 사람의 첫 주문 이슈) 때 계좌가 같은 시작 금액으로 열린다. 초대 = 명단에 한 줄 넣고 `main` 에 올리기.
   명단에서 빼면 그 계좌는 더 돌지 않고 순위표에서 빠진다(장부 파일은 남는다 — 지우지 않는다).
 - **본인 확인**: 참가자는 저장소에 이슈를 열어 주문한다. 이슈를 쓴 GitHub 계정이 곧 계좌다(GitHub 가 알려 주는 값이라 꾸밀 수 없다). 요청 안에 적힌 계좌 이름은 보지 않는다.
@@ -108,15 +112,26 @@ inbox/                주문 창구 — 운용자가 올린 주문 요청 파일
 - 명단·주문 이슈·같은 조건은 사용자가 고르지 않아 **내가 정한 기본값**이다. 바꾸려면 사용자에게 묻는다.
   실제로 대회를 열 때 물을 것: 대기 주문을 남에게 가릴지, 한 사람이 계좌를 여럿 가질 수 있는지, 대회용으로 새 계좌에서 다 같이 출발할지.
 
-### 진짜 로그인으로 가는 길 (사용자 결정 2026-11-14 — 아직 만들지 않았다)
-사용자는 관리자 화면을 "진짜 로그인(저장소 비공개)"으로 잠그기로 했다. 이 저장소 안에서 끝나는 일이 아니라 사용자가 바깥 서비스에 가입·설정해야 하고, 조사하다 나온 아래 사실 때문에 **어떻게 갈지 사용자 확인을 받고 만든다.**
-- 화면을 GitHub Pages 에서 Cloudflare Pages(비공개 저장소도 무료로 올릴 수 있다) + Cloudflare Access(로그인)로 옮기는 안이다. 화면 주소가 바뀐다.
-  출처(2026-11-14 검색): developers.cloudflare.com/pages/platform/limits (무료 한 달 500번 빌드) · developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/application-token/ (로그인한 사람의 정보는 서명된 토큰으로 오고, 서명을 확인해야 한다)
-- **확인된 걸림돌 ①** 개인 계정의 비공개 저장소는 협업자에게 쓰기 권한만 줄 수 있다(읽기만은 안 된다 — docs.github.com "Permission levels for a personal account repository"). 그래서 저장소를 비공개로 돌리면 **참가자가 주문 이슈를 열 수 없다**(열게 하려면 장부까지 고칠 수 있는 권한을 줘야 한다).
-  → 참가자의 주문은 로그인한 화면의 주문 양식으로 받고, 화면 쪽 프로그램이 `inbox/{계정}/` 에 요청을 올리는 길로 바꿔야 한다(거래소 쪽 받는 부분은 만들어 두었다).
-- **확인된 걸림돌 ②** 비공개 저장소는 GitHub 자동 실행 시간이 무료 한도(개인 계정 한 달 2,000분으로 알고 있다 — 확인 필요) 안에서만 돈다. 매시 실행(한 달 720번쯤)과 평일 아침 장전 수집(한 번에 55분쯤)을 합치면 한도를 넘을 수 있다. 공개 저장소는 한도가 없다.
-- **확인 못 한 것**: Cloudflare Access 무료 요금제의 인원 한도(50명이라는 글 하나뿐), GitHub 로그인으로 들어온 사람의 GitHub 계정 이름을 화면 쪽에서 받을 수 있는지(이메일은 받는다 — 안 되면 명단에 이메일을 적어야 한다).
-- 그때까지 `docs/admin.html` 은 잠기지 않은 화면이다.
+### 진짜 로그인 (사용자 결정 2026-11-14 — 프로그램은 만들었고, 실제로 올려 보지는 못했다)
+사용자는 관리자 화면을 "진짜 로그인(저장소 비공개)"으로 잠그기로 했고, 걸림돌을 듣고도 지금 만들기로 했다. 옮기는 순서는 `운영-안내.md`(사용자가 직접 한다).
+- **구도**: 화면은 Cloudflare Pages(비공개 저장소도 올릴 수 있다), 로그인은 Cloudflare Access. 모든 요청은 문지기 `functions/_middleware.js` → `site/lib.mjs` 를 지난다.
+  거래소(GitHub 자동 실행·장부)는 그대로다. 로그인이 없는 GitHub Pages 에서도 화면은 예전처럼 돈다(`api/me` 가 없으면 양식이 안 나올 뿐).
+- **문지기가 하는 일**(`site/lib.mjs`):
+  ① Access 가 붙인 토큰의 서명·대상(`ACCESS_AUD`)·발급처·기한을 확인하고 이메일을 꺼낸다. 설정이 비어 있으면 아무도 들이지 않는다.
+  ② 이메일 → 계좌: 저장소 `config.json` 의 `players[].email`. 관리자는 환경변수 `ADMIN_EMAILS`(저장소에 적지 않는다)이고 주인 계좌의 주인으로 본다.
+  ③ `/data/…` 는 저장소에서 바로 읽어 준다 — 자기 계좌(`accounts/{이름표}.json`)만, `league.json`·`state.json`·`admin.html` 은 관리자만. 정해진 경로 말고는 아무것도 내주지 않는다.
+  ④ `/api/order` → 저장소 `inbox/{이름표}/` 에 요청 파일을 올린다(거래소의 주문 창구가 접수). 계좌는 로그인한 사람의 것, 요청 안의 계좌는 보지 않는다. 같은 화면에서 온 요청만 받는다.
+  ⑤ `/api/admin`(관리자만) → 저장소에 `[관리]` 이슈를 연다. 토큰 주인 = 거래소 주인이라 거래소가 주인의 명령으로 받는다.
+- **명단**에 `id`(이름표 — GitHub 계정이 없는 사람용)와 `email`(로그인 이메일)이 더해졌다. 이름표가 계좌 폴더·화면 주소의 이름이다. 이메일은 화면 자료(`state.json`·`league.json`)에 싣지 않는다.
+  **저장소가 공개인 동안에는 명단에 이메일을 넣지 않는다**(누구에게나 보인다).
+- **비밀**: GitHub 토큰과 관리자 이메일은 Cloudflare 설정에만 있다. 저장소·화면 자료·이 대화에 넣지 않는다.
+- **조사로 확인한 것**(2026-11-14 검색): Cloudflare Pages 는 무료로 비공개 저장소를 올릴 수 있고 한 달 500번까지 다시 올린다(developers.cloudflare.com/pages/platform/limits).
+  Access 가 넘겨주는 토큰은 서명을 확인해야 하고 이메일이 들어 있다(developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/application-token/).
+  개인 계정의 비공개 저장소는 협업자에게 쓰기 권한만 줄 수 있다(docs.github.com "Permission levels for a personal account repository") — 그래서 비공개가 되면 참가자는 주문 이슈를 못 열고 화면의 주문 양식으로 주문한다.
+- **확인 못 한 것**: 실제 Cloudflare 에서의 동작 전부(문지기가 정적 파일 요청 앞에서도 도는지, `functions/` 밖의 `site/lib.mjs` 를 함께 묶어 주는지, 메뉴 이름).
+  Access 무료 인원 한도. 비공개 저장소의 GitHub 자동 실행 무료 한도(개인 계정 한 달 2,000분으로 알고 있다) — 매시 실행 + 아침 장전 수집을 합치면 닿을 수 있다.
+  거래소가 매시 자료를 올릴 때마다 Cloudflare 가 화면을 다시 올리면 500번 한도를 넘는다 → `운영-안내.md` 에 "바뀐 경로를 가려서 올리기" 설정을 적어 두었다(그 설정 이름도 확인 못 했다).
+- 로그인 있는 주소로 옮기기 전까지 `docs/admin.html` 은 잠기지 않은 화면이다.
 
 ## 체결 방식 (2026-11-14 1분 단위로 바꿈 — 주문이 한 건도 없을 때)
 - 주문 종류: 시장가(기본) · 종가(`--type moc`) · 지정가(`limit`) · 손절(`stop`). 환전(`--symbol USD`)은 아래 "돈의 흐름" 절.
