@@ -180,7 +180,6 @@ footer{margin:40px 0 50px; padding-top:16px; border-top:1px solid var(--line); c
     <span class="tag" id="integ">장부 확인 중</span>
     <span class="tag" id="upd">불러오는 중</span>
   </header>
-  <div id="league"></div>
   <main id="app"><p class="empty" style="margin-top:20px">장부를 불러오는 중입니다.</p></main>
   <footer id="foot"></footer>
 </div>
@@ -195,47 +194,10 @@ const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&g
 const when=ts=>{const d=new Date(ts);return d.toLocaleString('ko-KR',{month:'numeric',day:'numeric',weekday:'short',hour:'2-digit',minute:'2-digit',hour12:false,timeZone:'Asia/Seoul'})};
 const KIND={weekly:'주간 보고',monthly:'월간 보고',special:'임시 보고'};
 const STATUS={filled:'체결',partial:'일부',pending:'대기',rejected:'거부',expired:'만료',canceled:'취소'};
-let S=null, L=null, filter='all', feedAll=false, period='all';
+let S=null, filter='all', feedAll=false;
 const ACC=(new URLSearchParams(location.search).get('a')||'').toLowerCase().replace(/[^a-z0-9-]/g,'');
 
-function spark(v, base){
-  if(!v||v.length<2) return '';
-  const lo=Math.min(...v,base), hi=Math.max(...v,base), sp=(hi-lo)||1, W=90, H=26;
-  const pts=v.map((y,i)=>(W*i/(v.length-1)).toFixed(1)+','+(H-2-(H-4)*(y-lo)/sp).toFixed(1)).join(' ');
-  const col=v[v.length-1]>base?'#ff5b62':v[v.length-1]<base?'#4d8dff':'#9aa6c2';
-  return `<svg viewBox="0 0 ${W} ${H}" aria-hidden="true"><polyline points="${pts}" fill="none" stroke="${col}" stroke-width="1.5"/></svg>`;
-}
 const pp=n=>(n==null?'—':(n>0?'+':'')+n.toFixed(2)+'%p');
-function renderLeague(){
-  if(!L||!L.players||!L.players.length){ $('#league').innerHTML=''; return; }
-  const cur=ACC||(S&&S.player&&S.player.id)||'';
-  const ret=p=>period==='all'?{pct:p.pnl_pct,excess_pct:p.excess_pct}:((p.returns||{})[period]||null);
-  const rows=L.players.map(p=>({p,r:ret(p)})).sort((x,y)=>((y.r?y.r.pct:-1e9)-(x.r?x.r.pct:-1e9))||x.p.id.localeCompare(y.p.id));
-  let rk=0; rows.forEach((x,i)=>{ x.rank=!x.r?'—':(i&&rows[i-1].r&&rows[i-1].r.pct===x.r.pct?rows[i-1].rank:(rk=i+1)); });
-  const chips=(L.periods||[]).filter(k=>k.key==='all'||L.players.some(p=>(p.returns||{})[k.key]));
-  const who=p=>`<a href="?a=${encodeURIComponent(p.id)}">${esc(p.name)}</a>${p.agent?` <span class="who">· ${esc(p.agent)}</span>`:''}`;
-  const contests=(L.contests||[]).map(c=>`<h3 class="ct">${esc(c.name)} <small>${c.start} ~ ${c.end||'끝 없음'} · ${c.status}</small></h3>
-    ${c.players.length?`<div class="tblwrap"><table><thead><tr><th>순위</th><th>참가자</th><th>이 기간 수익률</th><th class="c3">비교 기준보다</th><th class="c3">잰 기간</th></tr></thead><tbody>
-      ${c.players.map(x=>`<tr class="${x.id===cur?'me':''}"><td class="rk num">${x.rank}</td><td>${who(x)}</td>
-        <td class="num ${cls(x.pct)}">${pct(x.pct)}</td><td class="num c3 ${cls(x.excess_pct)}">${pp(x.excess_pct)}</td>
-        <td class="num c3">${x.from} ~ ${x.to}${x.late?' · 늦게 들어옴':''}</td></tr>`).join('')}
-    </tbody></table></div>`:`<div class="empty">아직 시작하지 않았습니다.</div>`}`).join('');
-  $('#league').innerHTML=`<section class="league"><h2>${esc(L.name)} 순위 <small>${L.players.length}명 · 같은 시작 금액 ${won(L.initial)}원 · 수익률 순</small></h2>
-    <p class="sub">이름을 누르면 그 계좌의 성적과 보유 종목, 주문 전표가 아래에 나옵니다. 기간을 바꾸면 그 기간의 수익률로 다시 줄을 세웁니다.</p>
-    ${chips.length>1?`<div class="chips">${chips.map(k=>`<button class="chip pd ${period===k.key?'on':''}" data-p="${k.key}">${k.label}</button>`).join('')}</div>`:''}
-    <div class="tblwrap"><table><thead><tr><th>순위</th><th>참가자</th><th>수익률</th><th>총자산</th><th class="c3">비교 기준보다</th><th class="c3">최대 낙폭</th><th class="c3">보유</th><th class="c3">흐름</th></tr></thead><tbody>
-    ${rows.map(({p,r,rank})=>`<tr class="${p.id===cur?'me':''}">
-      <td class="rk num">${rank}</td>
-      <td>${who(p)}${p.integrity_ok?'':' <span class="tag bad">장부 맞지 않음</span>'}</td>
-      <td class="num ${cls(r?r.pct:0)}">${r?pct(r.pct):'—'}</td>
-      <td class="num">${won(p.total)}원</td>
-      <td class="num c3 ${cls(r?r.excess_pct:0)}">${r?pp(r.excess_pct):'—'}</td>
-      <td class="num c3 ${cls(p.max_drawdown_pct)}">${p.max_drawdown_pct==null?'—':p.max_drawdown_pct.toFixed(2)+'%'}</td>
-      <td class="num c3">${p.n_positions}종목</td>
-      <td class="c3">${spark(p.curve,L.initial)}</td></tr>`).join('')}
-    </tbody></table></div>${contests}</section>`;
-  document.querySelectorAll('.chip.pd').forEach(b=>b.onclick=()=>{period=b.dataset.p;renderLeague()});
-}
 function perfSection(){
   const P=S.performance; if(!P) return '';
   const m=P.max_drawdown||{};
@@ -334,8 +296,7 @@ function slip(o){
 function render(){
   const s=S.summary, eq=S.equity, last=eq[eq.length-1];
   const excess=s.bench_pct==null?null:+(s.pnl_pct-s.bench_pct).toFixed(2);
-  $('#acct').textContent=(L&&L.players&&L.players.length>1&&S.player&&S.player.name!==S.account?S.player.name+' — ':'')+S.account+' 장부';
-  renderLeague();
+  $('#acct').textContent=(S.player&&S.player.name&&S.player.name!==S.account?S.player.name+' — ':'')+S.account+' 장부';
   $('#upd').textContent='갱신 '+when(S.updated);
   const ig=$('#integ'); ig.className='tag '+(S.integrity.ok?'ok':'bad');
   ig.textContent=S.integrity.ok?`장부 ${S.integrity.lines}줄 · 손댄 흔적 없음`:`장부 ${S.integrity.broken_at}번째 줄이 맞지 않음`;
@@ -434,12 +395,10 @@ async function load(){
   const demo=new URLSearchParams(location.search).has('demo');
   if(demo) $('#demo').innerHTML='<div class="demo">시험용 가짜 자료입니다 — 화면이 어떻게 채워지는지 보는 용도</div>';
   try{
-    if(!demo){ try{ const lr=await fetch(`data/league.json?t=${Date.now()}`,{cache:'no-store'}); L=lr.ok?await lr.json():null; }catch(e){ L=null; } }
     const r=await fetch(`data/${demo?'demo':ACC?'accounts/'+ACC:'state'}.json?t=${Date.now()}`,{cache:'no-store'});
     if(!r.ok) throw new Error(r.status);
     S=await r.json(); render();
   }catch(e){
-    renderLeague();
     $('#app').innerHTML=`<p class="empty" style="margin-top:20px">${ACC?'이 참가자의 계좌 자료가 아직 없습니다. 명단에 들어간 뒤 첫 정기 실행에서 만들어집니다.':'장부 자료를 불러오지 못했습니다. 잠시 뒤 다시 열어 주세요.'}</p>`;
   }
 }
