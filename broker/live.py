@@ -39,12 +39,12 @@ def snapshot(code):
 
 
 def default_symbols():
-    led = HOME / "ledger" / "ledger.jsonl"
-    if not led.exists():
-        return []
-    import broker                                      # 장부를 읽기만 한다
-    st = broker.replay(broker.read_ledger())
-    syms = {o["symbol"] for o in st["orders"].values() if o["status"] in broker.OPEN} | {s for s, l in st["lots"].items() if l}
+    import broker                                      # 장부를 읽기만 한다 (모든 참가자 계좌)
+    syms = set()
+    for acct in broker.accounts():
+        broker.use(acct)
+        st = broker.replay(broker.read_ledger())
+        syms |= {o["symbol"] for o in st["orders"].values() if o["status"] in broker.OPEN} | {s for s, l in st["lots"].items() if l}
     return sorted(s for s in syms if px.market_of(s) == "KR")
 
 

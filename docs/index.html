@@ -141,6 +141,17 @@ tr:last-child td{border-bottom:0}
 .mcard .sum{border-top:1px solid var(--line); padding-top:6px; margin-top:2px; color:var(--txt); font-weight:700}
 .mcard .note{margin:8px 0 0; font-size:12px; color:var(--dim)}
 .tblwrap{overflow-x:auto; margin-top:10px}
+/* 순위표 */
+.league{margin:18px 0 0}
+.league h2{display:flex; flex-wrap:wrap; gap:6px 12px; align-items:baseline}
+.league h2 small{font-size:13px; font-weight:400; color:var(--dim)}
+.league td.rk{width:56px; font-weight:900; color:var(--gold)} .league th,.league td.num{white-space:nowrap}
+.league th:nth-child(2),.league td:nth-child(2){text-align:left}
+.league tr.me td{background:rgba(242,193,78,.08)}
+.league a{text-decoration:none; font-weight:700; border-bottom:1px dotted var(--dim)}
+.league .who{font-size:12px; color:var(--dim); font-weight:400}
+.league svg{width:90px; height:26px; vertical-align:middle}
+.back{display:inline-block; margin:14px 0 0; font-size:13.5px; color:var(--dim)}
 .feed time{display:block; font-size:12px; color:var(--dim)}
 .more{font:inherit; margin-top:4px; background:transparent; color:var(--dim); border:1px solid var(--line); border-radius:99px; padding:6px 14px; cursor:pointer}
 
@@ -154,6 +165,7 @@ footer{margin:40px 0 50px; padding-top:16px; border-top:1px solid var(--line); c
   .prow{grid-template-columns:1fr 1fr} .prow .c3{display:none}
   .hero .in{padding:20px 16px 150px} .legend{left:16px} .axis{display:none}
   th,td{padding:9px 10px; font-size:13px}
+  .league .c3{display:none}
 }
 </style>
 </head>
@@ -167,6 +179,7 @@ footer{margin:40px 0 50px; padding-top:16px; border-top:1px solid var(--line); c
     <span class="tag" id="integ">장부 확인 중</span>
     <span class="tag" id="upd">불러오는 중</span>
   </header>
+  <div id="league"></div>
   <main id="app"><p class="empty" style="margin-top:20px">장부를 불러오는 중입니다.</p></main>
   <footer id="foot"></footer>
 </div>
@@ -181,7 +194,33 @@ const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&g
 const when=ts=>{const d=new Date(ts);return d.toLocaleString('ko-KR',{month:'numeric',day:'numeric',weekday:'short',hour:'2-digit',minute:'2-digit',hour12:false,timeZone:'Asia/Seoul'})};
 const KIND={weekly:'주간 보고',monthly:'월간 보고',special:'임시 보고'};
 const STATUS={filled:'체결',partial:'일부',pending:'대기',rejected:'거부',expired:'만료',canceled:'취소'};
-let S=null, filter='all', feedAll=false;
+let S=null, L=null, filter='all', feedAll=false;
+const ACC=(new URLSearchParams(location.search).get('a')||'').toLowerCase().replace(/[^a-z0-9-]/g,'');
+
+function spark(v, base){
+  if(!v||v.length<2) return '';
+  const lo=Math.min(...v,base), hi=Math.max(...v,base), sp=(hi-lo)||1, W=90, H=26;
+  const pts=v.map((y,i)=>(W*i/(v.length-1)).toFixed(1)+','+(H-2-(H-4)*(y-lo)/sp).toFixed(1)).join(' ');
+  const col=v[v.length-1]>base?'#ff5b62':v[v.length-1]<base?'#4d8dff':'#9aa6c2';
+  return `<svg viewBox="0 0 ${W} ${H}" aria-hidden="true"><polyline points="${pts}" fill="none" stroke="${col}" stroke-width="1.5"/></svg>`;
+}
+function renderLeague(){
+  if(!L||!L.players||!L.players.length){ $('#league').innerHTML=''; return; }
+  const cur=ACC||(S&&S.player&&S.player.id)||'';
+  $('#league').innerHTML=`<section class="league"><h2>${esc(L.name)} 순위 <small>참가 ${L.players.length}명 · 같은 시작 금액 ${won(L.initial)}원 · 수익률 순</small></h2>
+    <p class="sub">이름을 누르면 그 계좌의 보유 종목과 주문 전표가 아래에 나옵니다.</p>
+    <div class="tblwrap"><table><thead><tr><th>순위</th><th>참가자</th><th>수익률</th><th>총자산</th><th class="c3">비교 기준보다</th><th class="c3">보유</th><th class="c3">주문</th><th class="c3">흐름</th></tr></thead><tbody>
+    ${L.players.map(p=>`<tr class="${p.id===cur?'me':''}">
+      <td class="rk num">${p.rank}</td>
+      <td><a href="?a=${encodeURIComponent(p.id)}">${esc(p.name)}</a>${p.agent?` <span class="who">· ${esc(p.agent)}</span>`:''}${p.integrity_ok?'':' <span class="tag bad">장부 맞지 않음</span>'}</td>
+      <td class="num ${cls(p.pnl_pct)}">${pct(p.pnl_pct)}</td>
+      <td class="num">${won(p.total)}원</td>
+      <td class="num c3 ${cls(p.excess_pct)}">${p.excess_pct==null?'—':(p.excess_pct>0?'+':'')+p.excess_pct.toFixed(2)+'%p'}</td>
+      <td class="num c3">${p.n_positions}종목</td>
+      <td class="num c3">${p.n_orders}건</td>
+      <td class="c3">${spark(p.curve,L.initial)}</td></tr>`).join('')}
+    </tbody></table></div></section>`;
+}
 
 function curve(eq){
   const W=1000,H=300,pad=8;
@@ -267,7 +306,8 @@ function slip(o){
 function render(){
   const s=S.summary, eq=S.equity, last=eq[eq.length-1];
   const excess=s.bench_pct==null?null:+(s.pnl_pct-s.bench_pct).toFixed(2);
-  $('#acct').textContent=S.account+' 장부';
+  $('#acct').textContent=(L&&L.players&&L.players.length>1&&S.player&&S.player.name!==S.account?S.player.name+' — ':'')+S.account+' 장부';
+  renderLeague();
   $('#upd').textContent='갱신 '+when(S.updated);
   const ig=$('#integ'); ig.className='tag '+(S.integrity.ok?'ok':'bad');
   ig.textContent=S.integrity.ok?`장부 ${S.integrity.lines}줄 · 손댄 흔적 없음`:`장부 ${S.integrity.broken_at}번째 줄이 맞지 않음`;
@@ -338,7 +378,7 @@ function render(){
     </tbody></table></div>`:''}
   </section>
 
-  <section><h2>주문 전표</h2><p class="sub">낸 주문 하나하나와 그 결과입니다. 도장이 결과입니다. 왜 그렇게 주문했는지는 운용 일지에 있습니다.</p>
+  <section><h2>주문 전표</h2><p class="sub">낸 주문 하나하나와 그 결과입니다. 도장이 결과입니다. 왜 그렇게 주문했는지는 거래소가 알지 못합니다.</p>
     <div class="chips">
       ${[['all','전체',S.orders.length],['pending','대기·일부',cnt('pending')],['filled','체결',cnt('filled')],['etc','거부·만료·취소',cnt('etc')]]
         .map(([k,l,n])=>`<button class="chip ${filter===k?'on':''}" data-f="${k}">${l} ${n}</button>`).join('')}
@@ -364,11 +404,13 @@ async function load(){
   const demo=new URLSearchParams(location.search).has('demo');
   if(demo) $('#demo').innerHTML='<div class="demo">시험용 가짜 자료입니다 — 화면이 어떻게 채워지는지 보는 용도</div>';
   try{
-    const r=await fetch(`data/${demo?'demo':'state'}.json?t=${Date.now()}`,{cache:'no-store'});
+    if(!demo){ try{ const lr=await fetch(`data/league.json?t=${Date.now()}`,{cache:'no-store'}); L=lr.ok?await lr.json():null; }catch(e){ L=null; } }
+    const r=await fetch(`data/${demo?'demo':ACC?'accounts/'+ACC:'state'}.json?t=${Date.now()}`,{cache:'no-store'});
     if(!r.ok) throw new Error(r.status);
     S=await r.json(); render();
   }catch(e){
-    $('#app').innerHTML='<p class="empty" style="margin-top:20px">장부 자료를 불러오지 못했습니다. 잠시 뒤 다시 열어 주세요.</p>';
+    renderLeague();
+    $('#app').innerHTML=`<p class="empty" style="margin-top:20px">${ACC?'이 참가자의 계좌 자료가 아직 없습니다. 명단에 들어간 뒤 첫 정기 실행에서 만들어집니다.':'장부 자료를 불러오지 못했습니다. 잠시 뒤 다시 열어 주세요.'}</p>`;
   }
 }
 load(); setInterval(load, 5*60*1000);

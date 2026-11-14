@@ -9,7 +9,14 @@
 장부 줄 종류: open · order · cancel · fill · reject · expire · refuse · fx(환전) · dividend(배당) · split(분할·병합).
   옛 fill 줄(ccy·delta 가 없는 것)은 원화 한 주머니 시절 것으로 읽는다.
 
-장부는 {HOME}/ledger/ledger.jsonl 한 파일이다. 줄 추가만 하고, 줄마다 앞줄의 지문(hash)을 품는다.
+참가자가 여럿이다 (config.json "players" — 주인이 넣은 GitHub 계정 명단). 계좌는 참가자마다 하나, 장부도 계좌마다 하나다.
+  주인 계좌("main": true)는 예전 자리 그대로: ledger/ledger.jsonl, docs/data/state.json, 주문 창구 inbox/.
+  다른 참가자는 accounts/{계정}/ledger.jsonl, docs/data/accounts/{계정}.json. 주문은 본인 GitHub 계정으로 연 "주문 이슈"로만 받는다
+  (python broker/broker.py issue — 자동 실행 issue-window 가 부른다. 이슈를 쓴 계정이 곧 계좌다. 요청 안의 계좌 이름은 보지 않는다).
+  시세(data/)는 모두가 함께 쓴다. 순위표는 docs/data/league.json.
+  한 계좌만 다루려면 명령 앞에 --account 계정 (없으면 주인 계좌). update·settle·build·daily·verify 는 모든 계좌를 돈다.
+
+장부는 계좌마다 한 파일이다 (주인 계좌는 {HOME}/ledger/ledger.jsonl). 줄 추가만 하고, 줄마다 앞줄의 지문(hash)을 품는다.
 상태(현금·보유·주문 상태)는 장부를 처음부터 다시 읽어 만든다.
 
 쓰는 법 (통합 개발/모의투자 에서):
@@ -35,6 +42,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -47,6 +55,8 @@ KST = px.KST
 HOME = Path(os.environ.get("PAPER_HOME") or Path(__file__).resolve().parent.parent)
 LEDGER = HOME / "ledger" / "ledger.jsonl"
 STATE_OUT = HOME / "docs" / "data" / "state.json"
+LEAGUE_OUT = HOME / "docs" / "data" / "league.json"
+ACCT = {"id": "main", "github": None, "name": None, "agent": None, "main": True}     # 지금 다루는 계좌
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -59,6 +69,87 @@ def now():
 
 def config():
     return json.loads((HOME / "config.json").read_text(encoding="utf-8"))
+
+
+# ---------- 계좌 (참가자) ----------
+def accounts(cfg=None):
+    """참가자 계좌 목록. 명단(players)이 없으면 주인 계좌 하나. 계정 이름은 파일 이름이 되므로 GitHub 계정 글자만 받는다."""
+    cfg = cfg or config()
+    out = []
+    for p in cfg.get("players") or []:
+        gh = str(p.get("github") or "").strip()
+        aid = gh.lower()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,38}", aid) or any(x["id"] == aid for x in out):
+            continue
+        out.append({"id": aid, "github": gh, "name": str(p.get("name") or gh), "agent": p.get("agent"),
+                    "main": bool(p.get("main")) and not any(x["main"] for x in out)})
+    if not any(x["main"] for x in out):                 # 예전 장부(주인 계좌)는 언제나 남는다
+        out.insert(0, {"id": "main", "github": None, "name": cfg["account_name"], "agent": None, "main": True})
+    return out
+
+
+def use(acct):
+    """이제부터 이 계좌의 장부·화면 자료를 다룬다."""
+    global LEDGER, STATE_OUT, ACCT
+    ACCT = acct
+    if acct["main"]:
+        LEDGER, STATE_OUT = HOME / "ledger" / "ledger.jsonl", HOME / "docs" / "data" / "state.json"
+    else:
+        LEDGER = HOME / "accounts" / acct["id"] / "ledger.jsonl"
+        STATE_OUT = HOME / "docs" / "data" / "accounts" / f"{acct['id']}.json"
+
+
+def account_label(cfg):
+    return cfg["account_name"] if ACCT["main"] else ACCT["name"]
+
+
+def pick(account_id):
+    """--account 로 고른 계좌 (없으면 주인 계좌)."""
+    accts = accounts()
+    if not account_id:
+        return next(x for x in accts if x["main"])
+    a = next((x for x in accts if x["id"] == str(account_id).lower()), None)
+    if not a:
+        sys.exit(f"명단에 없는 계좌입니다: {account_id}")
+    return a
+
+
+def open_missing():
+    """명단에 있는데 아직 장부가 없는 참가자의 계좌를 연다 (모두 같은 시작 금액·규칙)."""
+    cfg, here = config(), ACCT
+    for acct in accounts(cfg):
+        use(acct)
+        if not read_ledger():
+            append("open", {"account": account_label(cfg), "player": acct["github"], "initial_cash": cfg["initial_cash"],
+                            "opened": now().date().isoformat(), "fees": fee_cfg(cfg), "rules": cfg["rules"]})
+            print(f"계좌 개설: {account_label(cfg)} · {cfg['initial_cash']:,}원")
+    use(here)
+
+
+def build_league():
+    """순위표: 계좌별 화면 자료에서 한 줄씩 뽑아 수익률 순으로."""
+    cfg, rows = config(), []
+    for acct in accounts(cfg):
+        f = HOME / "docs" / "data" / "accounts" / f"{acct['id']}.json"
+        if not f.exists():
+            continue
+        st = json.loads(f.read_text(encoding="utf-8"))
+        s = st["summary"]
+        rows.append({"id": acct["id"], "name": acct["name"], "github": acct["github"], "agent": acct["agent"],
+                     "opened": st["opened"], "asof": st["equity"][-1]["d"] if st["equity"] else None,
+                     "total": s["total"], "pnl_krw": s["pnl_krw"], "pnl_pct": s["pnl_pct"], "bench_pct": s["bench_pct"],
+                     "excess_pct": None if s["bench_pct"] is None else round(s["pnl_pct"] - s["bench_pct"], 2),
+                     "cash_pct": s["cash_pct"], "n_positions": len(st["positions"]), "n_orders": s["n_orders"],
+                     "n_filled": s["n_filled"], "fees_krw": s["fees_krw"], "integrity_ok": st["integrity"]["ok"],
+                     "curve": [e["total"] for e in st["equity"]][-120:]})
+    rows.sort(key=lambda r: (-r["pnl_pct"], r["id"]))
+    for i, r in enumerate(rows):                        # 수익률이 같으면 같은 순위
+        r["rank"] = rows[i - 1]["rank"] if i and rows[i - 1]["pnl_pct"] == r["pnl_pct"] else i + 1
+    out = {"name": (cfg.get("league") or {}).get("name") or "모의 거래소", "updated": now().isoformat(timespec="seconds"),
+           "initial": cfg["initial_cash"], "players": rows}
+    LEAGUE_OUT.parent.mkdir(parents=True, exist_ok=True)
+    LEAGUE_OUT.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
+    return out
 
 
 # ---------- 장부 ----------
@@ -753,7 +844,8 @@ def build():
         us_gains = {"year": year, "realized_krw": round(gain), "deduction_krw": gt["deduction_krw"], "rate": gt["rate"],
                     "est_tax_krw": round(max(0.0, gain - gt["deduction_krw"]) * gt["rate"])}
     out = {
-        "account": cfg["account_name"], "updated": now().isoformat(timespec="seconds"),
+        "account": account_label(cfg), "updated": now().isoformat(timespec="seconds"),
+        "player": {k: ACCT[k] for k in ("id", "github", "name", "agent")},
         "opened": opened, "initial": st["initial"], "fee_rate": fc.get("KR", {}).get("commission_rate", cfg.get("fee_rate", 0)),
         "fees": fc,
         "rules": cfg["rules"],
@@ -788,6 +880,10 @@ def build():
     }
     STATE_OUT.parent.mkdir(parents=True, exist_ok=True)
     STATE_OUT.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
+    if ACCT["main"]:                                    # 주인 계좌도 다른 계좌와 같은 자리에서 읽을 수 있게 한 벌 더
+        twin = HOME / "docs" / "data" / "accounts" / f"{ACCT['id']}.json"
+        twin.parent.mkdir(parents=True, exist_ok=True)
+        twin.write_text(STATE_OUT.read_text(encoding="utf-8"), encoding="utf-8")
     return out
 
 
@@ -801,9 +897,9 @@ def cmd_open(a):
     if read_ledger():
         sys.exit("이미 열린 계좌입니다.")
     cfg = config()
-    append("open", {"account": cfg["account_name"], "initial_cash": cfg["initial_cash"],
+    append("open", {"account": account_label(cfg), "player": ACCT["github"], "initial_cash": cfg["initial_cash"],
                     "opened": now().date().isoformat(), "fees": fee_cfg(cfg), "rules": cfg["rules"]})
-    print(f"계좌 개설: {cfg['account_name']} · {cfg['initial_cash']:,}원")
+    print(f"계좌 개설: {account_label(cfg)} · {cfg['initial_cash']:,}원")
 
 
 class Refused(Exception):
@@ -845,7 +941,9 @@ def place_order(p):
                 raise Refused(f"가격이 상·하한가 범위를 벗어납니다 — 직전 종가 {prev:,.0f}원의 ±30% 안이어야 합니다.")
     if session == "all" and typ != "limit":
         raise Refused("장전·장후(시간외)에는 지정가 주문만 낼 수 있습니다. 시장가·손절·종가 주문은 정규장에서만 체결됩니다.")
-    data = {"ref": p.get("ref") or "", "symbol": sym, "market": mkt, "side": side, "type": typ,
+    if not re.fullmatch(r"[A-Z0-9.\-]{1,12}", sym):
+        raise Refused("종목 기호가 올바르지 않습니다")
+    data = {"ref": str(p.get("ref") or "")[:80], "symbol": sym, "market": mkt, "side": side, "type": typ,
             "price": price, "session": session}
     if p.get("client_id"):
         data["client_id"] = p["client_id"]
@@ -903,7 +1001,7 @@ def place_fx_order(p, st, cfg):
         krw_amt = float(krw_amt) if krw_amt else None
     except (TypeError, ValueError):
         raise Refused("환전 금액을 읽을 수 없습니다")
-    data = {"ref": p.get("ref") or "", "symbol": px.FX_KEY, "market": "FX", "side": side, "type": "market",
+    data = {"ref": str(p.get("ref") or "")[:80], "symbol": px.FX_KEY, "market": "FX", "side": side, "type": "market",
             "price": None, "session": "regular"}
     if p.get("client_id"):
         data["client_id"] = p["client_id"]
@@ -938,8 +1036,36 @@ def cmd_order(a):
         sys.exit(str(e))
 
 
+def handle_request(req, cid):
+    """요청 하나를 지금 계좌에 접수한다. 받은 것도 안 받은 것도 장부에 남긴다. 반환 (결과, 사람 말).
+    결과: "ok" 접수 · "no" 받지 않음 · "dup" 이미 처리한 요청."""
+    st = replay(read_ledger())
+    if cid in st["seen"]:
+        return "dup", "이미 처리한 요청입니다"
+    try:
+        if not req:
+            raise Refused("요청 파일을 읽을 수 없습니다")
+        req["client_id"] = cid
+        if req.get("action", "order") == "cancel":
+            o = st["orders"].get(req.get("order"))
+            if not o or o["status"] not in OPEN:
+                raise Refused(f"취소할 수 없는 주문입니다 ({req.get('order')})")
+            append("cancel", {"order": o["id"], "why": str(req.get("why") or "운용자 요청")[:200], "client_id": cid})
+            return "ok", f"주문 {o['id']} 취소를 접수했습니다"
+        try:
+            oid = place_order(req)
+        except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
+            raise Refused("주문 내용이 올바르지 않습니다")
+        return "ok", f"주문을 접수했습니다 — 주문 번호 {oid}"
+    except Refused as e:
+        append("refuse", {"client_id": cid, "why": str(e), "ref": str(req.get("ref", ""))[:80],
+                          "symbol": str(req.get("symbol", "")).upper()[:12], "side": req.get("side") if req.get("side") in ("buy", "sell") else None,
+                          "requested_at": req.get("requested_at")})
+        return "no", f"받지 않았습니다 — {e}"
+
+
 def cmd_ingest(a):
-    """주문 창구: inbox/ 의 요청 파일을 이름 순서대로 접수한다. 받은 것도 안 받은 것도 장부에 남기고 파일은 치운다.
+    """주문 창구(주인 계좌): inbox/ 의 요청 파일을 이름 순서대로 접수한다. 받은 것도 안 받은 것도 장부에 남기고 파일은 치운다.
     요청 파일(JSON): {"client_id": "...", "action": "order"|"cancel", ...주문 내용 또는 "order": "O0001", "why": "..."}"""
     inbox = HOME / "inbox"
     files = sorted(f for f in inbox.glob("*.json")) if inbox.exists() else []
@@ -948,34 +1074,63 @@ def cmd_ingest(a):
         try:
             req = json.loads(f.read_text(encoding="utf-8"))
             cid = str(req.get("client_id") or f.stem)
-            req["client_id"] = cid
         except Exception:
             req, cid = {}, f.stem
-        st = replay(read_ledger())
-        if cid in st["seen"]:
-            pass                                          # 이미 처리한 요청 (같은 파일이 다시 올라왔다)
-        else:
-            try:
-                if not req:
-                    raise Refused("요청 파일을 읽을 수 없습니다")
-                if req.get("action", "order") == "cancel":
-                    o = st["orders"].get(req.get("order"))
-                    if not o or o["status"] not in OPEN:
-                        raise Refused(f"취소할 수 없는 주문입니다 ({req.get('order')})")
-                    append("cancel", {"order": o["id"], "why": req.get("why") or "운용자 요청", "client_id": cid})
-                    print(f"  취소 접수 {o['id']}")
-                else:
-                    oid = place_order(req)
-                    print(f"  주문 접수 {oid} ← {cid}")
-                n_ok += 1
-            except Refused as e:
-                append("refuse", {"client_id": cid, "why": str(e), "ref": req.get("ref", ""),
-                                  "symbol": str(req.get("symbol", "")).upper(), "side": req.get("side"),
-                                  "requested_at": req.get("requested_at")})
-                print(f"  받지 않음 {cid} — {e}")
-                n_no += 1
+        res, msg = handle_request(req, cid)
+        if res != "dup":                                  # 이미 처리한 요청(같은 파일이 다시 올라왔다)은 조용히 치운다
+            print(f"  {cid} — {msg}")
+            n_ok, n_no = n_ok + (res == "ok"), n_no + (res == "no")
         f.unlink()
     print(f"주문 창구: 접수 {n_ok}건, 받지 않음 {n_no}건")
+
+
+MAX_PER_ISSUE = 10
+
+
+def parse_issue(body):
+    """주문 이슈 본문에서 요청을 꺼낸다. JSON 하나 또는 여러 개(목록). ``` 로 감싼 부분이 있으면 그 안만 본다."""
+    body = (body or "")[:20000]
+    m = re.search(r"```(?:json)?\s*(.*?)```", body, re.S)
+    obj = json.loads(m.group(1) if m else body)
+    reqs = obj if isinstance(obj, list) else [obj]
+    if not reqs or len(reqs) > MAX_PER_ISSUE or not all(isinstance(r, dict) for r in reqs):
+        raise ValueError
+    return reqs
+
+
+def cmd_issue(a):
+    """주문 이슈 하나를 접수한다. 이슈를 쓴 GitHub 계정이 곧 계좌다 — 요청 안에 적힌 계좌는 보지 않는다.
+    환경변수: PAPER_ISSUE_AUTHOR, PAPER_ISSUE_NUMBER, PAPER_ISSUE_BODY, PAPER_ISSUE_AT(이슈를 연 시각), PAPER_REPLY(답글을 적을 파일)."""
+    author = os.environ.get("PAPER_ISSUE_AUTHOR", "").strip()
+    num = re.sub(r"\D", "", os.environ.get("PAPER_ISSUE_NUMBER", "")) or "0"
+    acct = next((x for x in accounts() if x["github"] and x["github"].lower() == author.lower()), None)
+    lines = []
+    if not acct:
+        lines.append(f"`{author}` 계정은 참가자 명단에 없어 주문을 받지 않았습니다. 대회 주인에게 초대를 요청해 주세요.")
+    else:
+        open_missing()
+        use(acct)
+        try:
+            reqs = parse_issue(os.environ.get("PAPER_ISSUE_BODY", ""))
+        except Exception:
+            reqs = None
+        if reqs is None:
+            res, msg = handle_request({}, f"issue-{num}")
+            lines.append(f"- 받지 않았습니다 — 주문 내용을 읽을 수 없습니다. 주문 하나 또는 {MAX_PER_ISSUE}개까지의 목록을 정해진 모양으로 적어 주세요.")
+        else:
+            for i, req in enumerate(reqs):
+                cid = str(req.get("client_id") or (f"issue-{num}" + (f"-{i + 1}" if len(reqs) > 1 else "")))[:60]
+                req.pop("account", None)
+                req.setdefault("requested_at", os.environ.get("PAPER_ISSUE_AT") or None)
+                res, msg = handle_request(req, cid)
+                lines.append(f"- {msg}")
+        lines.insert(0, f"**{acct['name']}** 계좌 · 접수 시각 {now().strftime('%Y-%m-%d %H:%M')} (한국)")
+        lines.append("")
+        lines.append("체결은 주문 뒤에 시작한 1분 시세부터 이뤄지고, 매시 정기 실행 때 장부와 화면에 반영됩니다.")
+    text = "\n".join(lines)
+    print(text)
+    if os.environ.get("PAPER_REPLY"):
+        Path(os.environ["PAPER_REPLY"]).write_text(text + "\n", encoding="utf-8")
 
 
 def cmd_cancel(a):
@@ -987,19 +1142,32 @@ def cmd_cancel(a):
     print("취소:", a.order)
 
 
+def each_account(a):
+    """--account 가 있으면 그 계좌만, 없으면 모든 계좌를 차례로."""
+    accts = [pick(a.account)] if getattr(a, "account", None) else accounts()
+    for acct in accts:
+        use(acct)
+        if read_ledger():
+            yield acct
+
+
 def cmd_update(a):
-    st = replay(read_ledger())
-    t = now()
-    for k in needed_keys(st, config()):
+    cfg, t = config(), now()
+    keys, need = set(), set()
+    for _ in each_account(a):                             # 시세는 모든 계좌가 함께 쓴다
+        st = replay(read_ledger())
+        keys |= set(needed_keys(st, cfg))
+        # 1분 시세: 살아 있는 주문·보유 종목만 (체결 계산에 쓰인다). 미국 종목이나 달러가 있으면 환율도.
+        mine = {o["symbol"] for o in st["orders"].values() if o["status"] in OPEN} | {s for s, l in st["lots"].items() if l}
+        if any(px.market_of(k) == "US" for k in mine) or st["usd"] >= 0.01:
+            mine.add(px.FX_KEY)
+        need |= mine
+    for k in sorted(keys):
         try:
             c = px.update(HOME, k, t)
             print(f"  {k:8s} ~{c['bars'][-1]['d'] if c['bars'] else '없음'}  {c['name']}")
         except Exception as e:
             print(f"  {k:8s} 수집 실패: {e}")
-    # 1분 시세: 살아 있는 주문·보유 종목만 (체결 계산에 쓰인다). 미국 종목이 있으면 환율도.
-    need = {o["symbol"] for o in st["orders"].values() if o["status"] in OPEN} | {s for s, l in st["lots"].items() if l}
-    if any(px.market_of(k) == "US" for k in need) or st["usd"] >= 0.01:
-        need.add(px.FX_KEY)
     for k in sorted(need):
         try:
             n1, n5 = px.update_minutes(HOME, k, t)
@@ -1009,8 +1177,14 @@ def cmd_update(a):
 
 
 def cmd_settle(a):
+    for acct in each_account(a):
+        _settle_one(acct)
+
+
+def _settle_one(acct):
     for e in settle():
         d = e["data"]
+        print(f" [{acct['id']}]", end="")
         if e["type"] == "fill":
             print(f"  체결 {d['order']} {d['symbol']} {d['side']} {d['qty']}주 @ {d['price']} ({d['date']})")
         elif e["type"] == "fx":
@@ -1024,13 +1198,18 @@ def cmd_settle(a):
 
 
 def cmd_build(a):
-    s = build()["summary"]
-    print(f"화면 자료 갱신: 총자산 {s['total']:,}원 ({s['pnl_pct']:+.2f}%), 현금 {s['cash_pct']}%")
+    for acct in each_account(a):
+        s = build()["summary"]
+        print(f"화면 자료 갱신 [{acct['id']}]: 총자산 {s['total']:,}원 ({s['pnl_pct']:+.2f}%), 현금 {s['cash_pct']}%")
+    lg = build_league()
+    print(f"순위표: {len(lg['players'])}계좌")
 
 
 def cmd_daily(a):
+    use(pick(None))
     need_open(replay(read_ledger()))
-    cmd_ingest(a)
+    open_missing()                                        # 명단에 새로 들어온 참가자의 계좌를 연다
+    cmd_ingest(a)                                         # 주인 계좌의 창구 (다른 참가자는 주문 이슈로 들어온다)
     print("가격 갱신"); cmd_update(a)
     print("체결"); cmd_settle(a)
     cmd_build(a)
@@ -1050,13 +1229,18 @@ def cmd_status(a):
 
 
 def cmd_verify(a):
-    ok, n = verify()
-    print(f"장부 {n}줄 — 이상 없음" if ok else f"장부 {n}번째 줄에서 지문이 맞지 않습니다")
-    sys.exit(0 if ok else 1)
+    bad = 0
+    for acct in each_account(a):
+        ok, n = verify()
+        head = f"[{acct['id']}] " if len(accounts()) > 1 else ""
+        print(f"{head}장부 {n}줄 — 이상 없음" if ok else f"{head}장부 {n}번째 줄에서 지문이 맞지 않습니다")
+        bad += not ok
+    sys.exit(1 if bad else 0)
 
 
 def main():
     p = argparse.ArgumentParser(description="모의 증권 거래 시스템")
+    p.add_argument("--account")                                            # 다룰 계좌(참가자 GitHub 계정). 없으면 주인 계좌
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("open").set_defaults(f=cmd_open)
     s = sub.add_parser("order")
@@ -1071,15 +1255,17 @@ def main():
     s = sub.add_parser("cancel"); s.add_argument("--order", required=True); s.add_argument("--why", required=True)
     s.set_defaults(f=cmd_cancel)
     sub.add_parser("ingest").set_defaults(f=cmd_ingest)
+    sub.add_parser("issue").set_defaults(f=cmd_issue)
     for n, f in [("update", cmd_update), ("settle", cmd_settle), ("build", cmd_build),
                  ("daily", cmd_daily), ("status", cmd_status), ("verify", cmd_verify)]:
         sub.add_parser(n).set_defaults(f=f)
     a = p.parse_args()
     # 장부는 거래소 한 곳만 쓴다: 클라우드가 쓰기로 정해져 있으면 이 PC 에서는 읽기만 한다 (시험 폴더는 예외)
-    writes = {"open", "order", "cancel", "ingest", "update", "settle", "build", "daily"}
+    writes = {"open", "order", "cancel", "ingest", "issue", "update", "settle", "build", "daily"}
     if (a.cmd in writes and config().get("ledger_writer") == "cloud" and not os.environ.get("GITHUB_ACTIONS")
             and not os.environ.get("PAPER_HOME")):
         sys.exit("이 장부는 클라우드 거래소(GitHub 자동 실행)만 씁니다. 주문은 일지 도구로 요청하고, 상태는 git pull 로 받아 보세요.")
+    use(pick(a.account))
     a.f(a)
 
 

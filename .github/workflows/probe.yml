@@ -25,5 +25,6 @@ jobs:
           python tests/test_broker.py
           python tests/test_intraday.py
           python tests/test_money.py
+          python tests/test_league.py
       - name: 시세 원천 열리는지
         run: python tests/probe_sources.py

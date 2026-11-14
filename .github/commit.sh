@@ -6,6 +6,7 @@ git config user.name "paper-exchange-bot"
 git config user.email "paper-exchange-bot@users.noreply.github.com"
 git add -A ledger data docs/data
 git add -A inbox 2>/dev/null || true
+git add -A accounts 2>/dev/null || true
 if git diff --cached --quiet; then
   echo "바뀐 것 없음"
   exit 0
