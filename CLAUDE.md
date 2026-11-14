@@ -55,9 +55,9 @@ docs/admin.html       관리자 화면 — 모든 계좌의 수익률을 한 표
 docs/data/league.json 전체 계좌 수익률(기간별·대회) / docs/data/accounts/{계정}.json 계좌별 화면 자료 (주인 계좌도 한 벌 들어 있다)
 참가-안내.md          초대받은 사람이 읽는 글 — 주문하는 법
 운영-안내.md          거래소 주인이 읽는 글 — 화면을 sharktalk 주소로 옮기고(로그인 붙이기) 저장소를 비공개로 돌리는 순서
-wrangler.toml         화면을 `exchange.sharktalk.co.kr` 에 올리는 설정 (Cloudflare Workers, 사용자 PC 에서 `npx wrangler deploy`)
+wrangler.jsonc        화면을 `exchange.sharktalk.co.kr` 에 올리는 설정 (sharktalk 관례대로: 워커 `sharktalk-exchange`, 로그인은 `sharktalk-auth`. 사용자 PC 에서 `npx wrangler deploy`)
 site/worker.mjs       sharktalk 쪽에서 모든 요청을 먼저 받는 문 — 하는 일은 site/lib.mjs
-site/lib.mjs          문지기: 로그인 확인, 자기 계좌 자료만 내주기, 주문 양식 → inbox/{이름표}/, 관리 양식 → [관리] 이슈
+site/lib.mjs          문지기: sharktalk 로그인 확인, 자기 계좌 자료만 내주기, 주문 양식 → inbox/{이름표}/, 관리 양식 → [관리] 이슈
 tests/test_site.mjs   문지기 시험 (가짜 로그인 열쇠·가짜 저장소, node 로 돈다)
 docs/data/demo.json   화면 확인용 자료 (index.html?demo). tests/make_demo_real.py 로 다시 만든다
 tests/test_broker.py  장부·종가 주문·산 주문별 손익 시험 — 임시 폴더·가짜 가격으로만 돈다
@@ -113,30 +113,33 @@ inbox/                주문 창구 — 운용자가 올린 주문 요청 파일
 - 명단·주문 이슈·같은 조건은 사용자가 고르지 않아 **내가 정한 기본값**이다. 바꾸려면 사용자에게 묻는다.
   실제로 대회를 열 때 물을 것: 대기 주문을 남에게 가릴지, 한 사람이 계좌를 여럿 가질 수 있는지, 대회용으로 새 계좌에서 다 같이 출발할지.
 
-### 진짜 로그인 — 화면은 sharktalk 로 (사용자 결정 2026-11-14 — 프로그램은 만들었고, 실제로 올려 보지는 못했다)
-사용자는 관리자 화면을 "진짜 로그인(저장소 비공개)"으로 잠그기로 했고, 걸림돌을 듣고도 지금 만들기로 했다. 이어서 **"결국 사이트는 sharktalk 로 서빙해야 한다"** 고 했다.
-`sharktalk.co.kr` 은 사용자의 도메인이고 Cloudflare 에 물려 있다(바둑 사이트 `baduk.sharktalk.co.kr` 을 사용자 PC 에서 `wrangler` 로 Workers 에 올린 기록이 있다 — Worker 이름 `sharktalk-baduk`).
-거래소 화면도 같은 방식으로 `exchange.sharktalk.co.kr` 에 올린다(주소 이름은 내가 임시로 정했다 — `wrangler.toml` 의 `pattern`). 옮기는 순서는 `운영-안내.md`(사용자가 자기 PC 에서 직접 한다).
-- **구도**: 화면은 Cloudflare Workers(`wrangler.toml`, 화면 파일은 `docs/`), 로그인은 Cloudflare Access. 모든 요청이 먼저 문지기 `site/worker.mjs` → `site/lib.mjs` 를 지난다(`run_worker_first`).
-  `workers.dev` 주소와 미리 보기 주소는 끈다 — 로그인이 안 붙은 다른 문을 만들지 않는다. 자료 폴더(`docs/data`)는 올리지 않는다(`docs/.assetsignore`) — 자료는 문지기가 저장소에서 읽어 준다.
+### 화면은 sharktalk 로, 로그인은 sharktalk 로그인으로 (사용자 결정 2026-11-14 — 프로그램은 만들었고, 실제로 올려 보지는 못했다)
+사용자: 관리자 화면은 "진짜 로그인(저장소 비공개)"으로 잠근다 → "결국 사이트는 sharktalk 로 서빙해야 한다" → "sharktalk 는 그것(바둑 사이트) 말고도 엄청나게 많다."
+- **sharktalk 가 무엇인가**(지난 대화 기록 27개를 훑어 확인한 것 — 이 세션은 사용자 PC 의 `통합 개발` 폴더를 볼 수 없다):
+  사용자 개인 도메인 `sharktalk.co.kr` 아래 **개인 서비스 묶음**. 전부 사용자 **개인 Cloudflare 계정**의 Workers 이고, 회사(업무용) 계정·비밀값과는 완전히 나눈다.
+  서비스마다 "서브도메인 하나 = 워커 하나"(`routes … custom_domain: true`, `workers_dev`·`preview_urls` 끔), 사용자 PC 의 `통합 개발/{이름}` 폴더에서 `npx wrangler deploy`.
+  루트 `sharktalk.co.kr` 은 포털(`sharktalk-portal`), 로그인은 **`sharktalk-auth`(`auth.sharktalk.co.kr`)** — 다른 워커는 service binding `AUTH_SVC` 로 `/me` 에 쿠키를 넘겨 묻는다(비밀값을 나눠 갖지 않는다).
+  GitHub 저장소가 만든 자료를 내 도메인으로 내보내는 `sharktalk-mirror`(news·must·signal·map·ndx)도 있다. 그 밖에 cio·read·kid·books·shape·when·sisa·baduk 등.
+  관례: 올리기 전 `wrangler whoami` 로 개인 계정 확인, 다른 서비스에 영향이 있으면 올리지 않는다, 비밀값은 사용자가 `wrangler secret put` 으로, 프로젝트마다 `RESUME.md`.
+- **그래서 거래소 화면은**: 워커 `sharktalk-exchange`, 주소 `exchange.sharktalk.co.kr`(내가 임시로 정한 이름 — `wrangler.jsonc` 의 `pattern`), 화면 파일은 `docs/`, 로그인은 `sharktalk-auth`.
+  모든 요청이 먼저 문지기 `site/worker.mjs` → `site/lib.mjs` 를 지난다(`run_worker_first`). 자료 폴더(`docs/data`)는 올리지 않고(`docs/.assetsignore`) 문지기가 저장소에서 읽어 준다.
   거래소(GitHub 자동 실행·장부)는 그대로다. 로그인이 없는 GitHub Pages 에서도 화면은 예전처럼 돈다(`api/me` 가 없으면 양식이 안 나올 뿐).
 - **문지기가 하는 일**(`site/lib.mjs`):
-  ① Access 가 붙인 토큰의 서명·대상(`ACCESS_AUD`)·발급처·기한을 확인하고 이메일을 꺼낸다. 설정이 비어 있으면 아무도 들이지 않는다.
-  ② 이메일 → 계좌: 저장소 `config.json` 의 `players[].email`. 관리자는 환경변수 `ADMIN_EMAILS`(저장소에 적지 않는다)이고 주인 계좌의 주인으로 본다.
+  ① `AUTH_SVC` 의 `/me` 에 쿠키를 넘겨 로그인한 사람(이메일이나 아이디)을 받는다. 쿠키가 없거나 인증 워커가 모르면 들이지 않는다.
+  ② 로그인한 사람 → 계좌: 저장소 `config.json` 의 `players[].email` 또는 `players[].login`(sharktalk 아이디). 관리자는 비밀 설정 `ADMIN_EMAILS`(이메일이나 아이디)이고 주인 계좌의 주인으로 본다.
   ③ `/data/…` 는 저장소에서 바로 읽어 준다 — 자기 계좌(`accounts/{이름표}.json`)만, `league.json`·`state.json`·`admin.html` 은 관리자만. 정해진 경로 말고는 아무것도 내주지 않는다.
-  ④ `/api/order` → 저장소 `inbox/{이름표}/` 에 요청 파일을 올린다(거래소의 주문 창구가 접수). 계좌는 로그인한 사람의 것, 요청 안의 계좌는 보지 않는다. 같은 화면에서 온 요청만 받는다.
+  ④ `/api/order` → 저장소 `inbox/{이름표}/` 에 요청 파일을 올린다. 계좌는 로그인한 사람의 것, 요청 안의 계좌는 보지 않는다. 같은 화면에서 온 요청만 받는다.
   ⑤ `/api/admin`(관리자만) → 저장소에 `[관리]` 이슈를 연다. 토큰 주인 = 거래소 주인이라 거래소가 주인의 명령으로 받는다.
-- **명단**에 `id`(이름표 — GitHub 계정이 없는 사람용)와 `email`(로그인 이메일)이 더해졌다. 이름표가 계좌 폴더·화면 주소의 이름이다. 이메일은 화면 자료(`state.json`·`league.json`)에 싣지 않는다.
-  **저장소가 공개인 동안에는 명단에 이메일을 넣지 않는다**(누구에게나 보인다).
-- **비밀**: GitHub 토큰·로그인 값·관리자 이메일은 `wrangler secret` 으로 Cloudflare 에만 넣는다. 저장소(`wrangler.toml` 포함)·화면 자료·대화에 넣지 않는다.
-- **조사로 확인한 것**(2026-11-14 검색): Workers 의 화면 파일 설정에서 `run_worker_first = true` 면 모든 요청이 Worker 를 먼저 지난다. 기본값은 화면 파일을 먼저 내주는 것이라 꼭 켜야 한다.
-  `[assets]` 표 아래에 적은 설정은 그 표 안의 것으로 읽혀 무시된다(developers.cloudflare.com/workers/static-assets/ , /workers/static-assets/routing/worker-script/).
-  Access 가 넘겨주는 토큰은 서명을 확인해야 하고 이메일이 들어 있다(developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/application-token/).
-  개인 계정의 비공개 저장소는 협업자에게 쓰기 권한만 줄 수 있다(docs.github.com "Permission levels for a personal account repository") — 그래서 비공개가 되면 참가자는 주문 이슈를 못 열고 화면의 주문 양식으로 주문한다.
-- **확인 못 한 것**: 실제 Cloudflare 에서의 동작 전부. `wrangler.toml` 의 주소 연결 줄(`routes … custom_domain`)과 `.assetsignore` 는 기억으로 썼다 — 사용자의 바둑 폴더 설정과 견줘 봐야 한다.
-  Access 무료 인원 한도. 비공개 저장소의 GitHub 자동 실행 무료 한도(개인 계정 한 달 2,000분으로 알고 있다) — 매시 실행 + 아침 장전 수집을 합치면 닿을 수 있다.
+  (`AUTH_SVC` 가 없고 `ACCESS_TEAM`·`ACCESS_AUD` 가 있으면 Cloudflare Access 토큰으로 확인하는 길도 남아 있다 — sharktalk 밖에 올릴 때의 대안. sharktalk 에서는 쓰지 않는다.)
+- **★ 보지 못하고 맞춘 것 — 사용자 PC 에서 확인해야 한다**(`운영-안내.md` 2번): `/me` 의 주소와 돌려주는 모양(`identityFromMe()` 한 함수에 모아 두었다), 로그인 쿠키가 `exchange.` 서브도메인에도 오는지,
+  로그인하지 않은 사람을 보낼 주소, sharktalk 에 관리자 구분·가입 방식이 있는지, 포털 메뉴에 올리는 법. `sharktalk-auth` 는 읽기만 한다 — 그쪽 설정을 바꿔야 하는 일이 나오면 멈추고 사용자에게 묻는다.
+- **명단**에 `id`(이름표), `email`, `login`(sharktalk 아이디)이 더해졌다. 이름표가 계좌 폴더·화면 주소의 이름이다. 이메일·아이디는 화면 자료(`state.json`·`league.json`)에 싣지 않는다.
+  **저장소가 공개인 동안에는 명단에 이메일·아이디를 넣지 않는다**(누구에게나 보인다).
+- **비밀**: GitHub 토큰과 관리자 목록은 사용자가 `wrangler secret put` 으로 넣는다. 저장소(`wrangler.jsonc` 포함)·화면 자료·대화에 넣지 않는다.
+- **걸림돌**(조사로 확인): 개인 계정의 비공개 저장소는 협업자에게 쓰기 권한만 줄 수 있다(docs.github.com "Permission levels for a personal account repository") — 비공개가 되면 참가자는 주문 이슈를 못 열고 화면의 주문 양식으로 주문한다.
+  비공개 저장소는 GitHub 자동 실행에 무료 한도가 있다(개인 계정 한 달 2,000분으로 알고 있다 — 확인 필요). 매시 실행 + 아침 장전 수집을 합치면 닿을 수 있다.
 - 화면 파일이나 문지기를 고치면 사용자가 PC 에서 `npx wrangler deploy` 를 다시 해야 sharktalk 에 반영된다(자료는 다시 올릴 필요 없다). 이 세션에서는 올릴 수 없다.
-- 로그인 있는 주소로 옮기기 전까지 `docs/admin.html` 은 잠기지 않은 화면이다.
+- sharktalk 로 옮기기 전까지 `docs/admin.html` 은 잠기지 않은 화면이다.
 
 ## 체결 방식 (2026-11-14 1분 단위로 바꿈 — 주문이 한 건도 없을 때)
 - 주문 종류: 시장가(기본) · 종가(`--type moc`) · 지정가(`limit`) · 손절(`stop`). 환전(`--symbol USD`)은 아래 "돈의 흐름" 절.

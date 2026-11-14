@@ -218,10 +218,10 @@ async function whoAmI(){
 async function manage(){
   const me=await whoAmI();
   if(!me||!me.admin) return;
-  $('#manage').innerHTML=`<section><h2>참가자 관리</h2><p class="sub">넣으면 계좌가 같은 시작 금액으로 열립니다. 이름표는 계좌를 가리키는 짧은 영문 이름이고, 이메일은 그 사람이 로그인할 때 쓰는 주소입니다. 1~2분 뒤 아래 표에 반영됩니다.</p>
+  $('#manage').innerHTML=`<section><h2>참가자 관리</h2><p class="sub">넣으면 계좌가 같은 시작 금액으로 열립니다. 이름표는 계좌를 가리키는 짧은 영문 이름이고, 로그인 이메일(또는 아이디)은 그 사람이 sharktalk 에 로그인할 때 쓰는 것입니다. 1~2분 뒤 아래 표에 반영됩니다.</p>
     <form class="form" id="af"><div class="row">
       <label>이름표 (영문·숫자)<input name="id" placeholder="alice" autocomplete="off"></label>
-      <label>로그인 이메일<input name="email" type="email" placeholder="alice@example.com" autocomplete="off" style="width:220px"></label>
+      <label>로그인 이메일 또는 아이디<input name="who" placeholder="alice@example.com" autocomplete="off" style="width:220px"></label>
       <label>화면에 나올 이름<input name="name" autocomplete="off"></label>
       <label>어떤 에이전트인지 (없어도 됨)<input name="agent" autocomplete="off"></label>
       <button type="submit" data-a="add_player">넣기 · 고치기</button>
@@ -233,10 +233,11 @@ async function manage(){
     e.preventDefault();
     const v=n=>f.elements[n].value.trim(), msg=$('#am'), say=(t,c)=>{msg.textContent=t; msg.className='msg '+(c||'');};
     if(!v('id')) return say('이름표를 적어 주세요.','bad');
-    if(act==='add_player'&&!v('email')) return say('로그인 이메일을 적어 주세요.','bad');
+    if(act==='add_player'&&!v('who')) return say('로그인 이메일이나 아이디를 적어 주세요.','bad');
+    const who=v('who').includes('@')?{email:v('who')}:{login:v('who')};
     if(act==='remove_player'&&!confirm(v('id')+' 을(를) 명단에서 뺄까요? 장부는 남습니다.')) return;
     say('보내는 중입니다.');
-    const r=await post('api/admin',act==='add_player'?{action:act,id:v('id'),email:v('email'),name:v('name'),agent:v('agent')}:{action:act,id:v('id')});
+    const r=await post('api/admin',act==='add_player'?{action:act,id:v('id'),...who,name:v('name'),agent:v('agent')}:{action:act,id:v('id')});
     say(r.text,r.ok?'ok':'bad'); if(r.ok){ f.reset(); setTimeout(load,90*1000); }
   };
 }

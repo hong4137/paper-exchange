@@ -1,16 +1,20 @@
-// 로그인 있는 화면(sharktalk 주소 — Cloudflare Workers + Access)의 문지기. site/worker.mjs 가 모든 요청을 여기로 넘긴다.
+// 거래소 화면(exchange.sharktalk.co.kr)의 문지기. site/worker.mjs 가 모든 요청을 여기로 넘긴다.
 //
 // 하는 일
-//   1. 로그인 확인: Cloudflare Access 가 붙여 주는 서명된 토큰을 검증하고 이메일을 꺼낸다.
-//   2. 누구인지: 이메일 → 참가자 (비공개 저장소의 config.json players[].email), 관리자는 환경변수 ADMIN_EMAILS.
+//   1. 로그인 확인: sharktalk 인증 워커(sharktalk-auth)의 /me 에 쿠키를 넘겨 묻는다 (service binding AUTH_SVC).
+//      ★ /me 가 돌려주는 모양은 이 저장소에서 볼 수 없었다. identityFromMe() 한 곳에서 여러 모양을 받아 주게 해 두었으니,
+//        PC 에서 sharktalk-auth 의 실제 응답과 견줘 보고 다르면 그 함수만 고친다 (운영-안내.md 2번).
+//      AUTH_SVC 가 없고 ACCESS_TEAM·ACCESS_AUD 가 있으면 Cloudflare Access 토큰으로 확인한다 (sharktalk 밖에 올릴 때의 대안).
+//   2. 누구인지: 로그인한 사람(이메일 또는 sharktalk 아이디) → 참가자 (저장소 config.json players[] 의 email 또는 login).
+//      관리자는 비밀 설정 ADMIN_EMAILS (이메일이나 아이디, 쉼표로 여럿).
 //   3. 자료 내주기: /data/... 는 저장소에서 읽어 오되, 자기 계좌 것만. 전체 수익률과 관리자 화면은 관리자만.
 //   4. 주문 받기: /api/order → 저장소의 inbox/{계좌}/ 에 요청 파일을 올린다 (거래소의 주문 창구가 접수한다).
 //   5. 관리: /api/admin → 저장소에 "[관리]" 이슈를 연다 (거래소가 주인 계정의 이슈로 처리한다).
 //
-// 환경변수 (wrangler.toml 의 [vars] 와 wrangler secret)
-//   ACCESS_TEAM   예: myteam.cloudflareaccess.com        ACCESS_AUD   Access 애플리케이션의 Audience 값
-//   GITHUB_REPO   예: hong4137/paper-exchange            GITHUB_TOKEN 그 저장소의 Contents·Issues 읽기/쓰기 토큰 (비밀)
-//   ADMIN_EMAILS  관리자 이메일 (쉼표로 여럿)             GITHUB_BRANCH 기본 main
+// 설정 (wrangler.jsonc 의 vars·services 와 wrangler secret)
+//   AUTH_SVC      sharktalk-auth 워커 (service binding)     AUTH_ME_URL  /me 주소      LOGIN_URL  로그인하러 갈 주소
+//   GITHUB_REPO   예: hong4137/paper-exchange               GITHUB_TOKEN 그 저장소의 Contents·Issues 읽기/쓰기 토큰 (비밀)
+//   ADMIN_EMAILS  관리자의 이메일이나 아이디 (비밀)          GITHUB_BRANCH 기본 main
 //
 // 이 파일은 거래소의 돈 계산을 하지 않는다. 주문이 맞는지는 거래소(broker.py)가 판단한다.
 
@@ -36,7 +40,35 @@ async function accessKeys(env, fetchFn) {
 }
 export function _resetCaches() { certCache = { at: 0, keys: null }; cfgCache = { at: 0, cfg: null }; }
 
-/** 요청에 실린 Access 토큰을 검증한다. 맞으면 { email }, 아니면 null. */
+/** sharktalk-auth 의 /me 응답에서 "누구인가"를 꺼낸다. 로그인하지 않았으면 null.
+ *  받아 주는 모양: { email, id|login|username|sub } 가 바로 있거나 user·me·data 안에 있는 것.
+ *  ok·authenticated·loggedIn·logged_in 이 false 면 로그인하지 않은 것으로 본다. */
+export function identityFromMe(j) {
+  if (!j || typeof j !== 'object') return null;
+  for (const k of ['ok', 'authenticated', 'loggedIn', 'logged_in']) if (j[k] === false) return null;
+  const u = [j.user, j.me, j.data, j].find((x) => x && typeof x === 'object' && (x.email || x.id || x.login || x.username || x.sub));
+  if (!u) return null;
+  const email = typeof u.email === 'string' && u.email.includes('@') ? u.email.toLowerCase() : null;
+  const raw = u.login ?? u.username ?? u.id ?? u.sub;
+  const login = raw === undefined || raw === null ? null : String(raw).toLowerCase();
+  return email || login ? { email, login } : null;
+}
+
+/** sharktalk 로그인 확인: 인증 워커의 /me 에 쿠키를 넘겨 묻는다. 맞으면 { email, login }, 아니면 null. */
+export async function verifySharktalk(request, env) {
+  const cookie = request.headers.get('Cookie');
+  if (!cookie || !env.AUTH_SVC) return null;
+  try {
+    const r = await env.AUTH_SVC.fetch(new Request(env.AUTH_ME_URL || 'https://auth.sharktalk.co.kr/me',
+      { headers: { cookie, accept: 'application/json' } }));
+    if (!r.ok) return null;
+    return identityFromMe(await r.json());
+  } catch (e) {
+    return null;
+  }
+}
+
+/** 요청에 실린 Access 토큰을 검증한다. 맞으면 { email }, 아니면 null. (sharktalk 밖에 올릴 때의 대안) */
 export async function verifyAccess(request, env, fetchFn = fetch, now = Date.now()) {
   if (!env.ACCESS_TEAM || !env.ACCESS_AUD) return null;      // 설정이 없으면 아무도 들이지 않는다
   let token = request.headers.get('Cf-Access-Jwt-Assertion');
@@ -62,7 +94,7 @@ export async function verifyAccess(request, env, fetchFn = fetch, now = Date.now
     if (claims.iss !== `https://${teamHost(env)}`) return null;
     if (!claims.exp || claims.exp * 1000 <= now) return null;
     if (!claims.email) return null;
-    return { email: String(claims.email).toLowerCase() };
+    return { email: String(claims.email).toLowerCase(), login: null };
   } catch (e) {
     return null;
   }
@@ -93,14 +125,18 @@ async function loadConfig(env, fetchFn) {
 const accountId = (p) => String(p.id || p.github || '').toLowerCase();
 const validId = (s) => /^[a-z0-9][a-z0-9-]{0,38}$/.test(s);
 
-/** 이메일로 참가자를 찾는다. 반환 { email, admin, id, name, main } — 계좌가 없으면 id 는 null. */
-export function whoami(email, cfg, env) {
+/** 로그인한 사람으로 참가자를 찾는다. who = { email, login }. 반환 { email, login, admin, id, name, main } — 계좌가 없으면 id 는 null.
+ *  명단의 email(이메일) 또는 login(sharktalk 아이디)과 맞춰 본다. */
+export function whoami(who, cfg, env) {
+  if (typeof who === 'string') who = { email: who.toLowerCase(), login: null };
+  const mine = [who.email, who.login].filter(Boolean);
   const admins = String(env.ADMIN_EMAILS || '').toLowerCase().split(',').map((x) => x.trim()).filter(Boolean);
   const players = (cfg.players || []).filter((p) => validId(accountId(p)));
-  const admin = admins.includes(email);
-  let me = players.find((p) => String(p.email || '').toLowerCase() === email);
+  const admin = mine.some((x) => admins.includes(x));
+  const low = (v) => String(v || '').toLowerCase();
+  let me = players.find((p) => (who.email && low(p.email) === who.email) || (who.login && low(p.login) === who.login));
   if (!me && admin) me = players.find((p) => p.main);          // 관리자는 주인 계좌의 주인이다
-  return { email, admin, id: me ? accountId(me) : null, name: me ? (me.name || accountId(me)) : null, main: !!(me && me.main) };
+  return { email: who.email, login: who.login, admin, id: me ? accountId(me) : null, name: me ? (me.name || accountId(me)) : null, main: !!(me && me.main) };
 }
 
 // ---------- 3. 무엇을 볼 수 있나 ----------
@@ -151,7 +187,7 @@ export async function submitOrder(body, me, env, fetchFn = fetch, now = new Date
   return { ok: true, client_id: req.client_id };
 }
 
-const ADMIN_ACTIONS = { add_player: ['id', 'github', 'email', 'name', 'agent'], remove_player: ['id', 'github'],
+const ADMIN_ACTIONS = { add_player: ['id', 'github', 'email', 'login', 'name', 'agent'], remove_player: ['id', 'github'],
                         add_contest: ['name', 'start', 'end'], remove_contest: ['name'] };
 
 /** 관리 명령을 저장소의 "[관리]" 이슈로 넘긴다. 이슈는 토큰 주인(거래소 주인)의 이름으로 열린다. */
@@ -177,16 +213,19 @@ export async function handle(request, env, next, fetchFn = fetch) {
   const url = new URL(request.url);
   const path = url.pathname;
   const api = path.startsWith('/api/') || path.startsWith('/data/');
-  const who = await verifyAccess(request, env, fetchFn);
-  if (!who) return api ? json({ error: '로그인이 필요합니다' }, 401) : deny(401, '로그인이 필요합니다. 주소를 다시 열어 로그인해 주세요.');
+  const who = env.AUTH_SVC ? await verifySharktalk(request, env) : await verifyAccess(request, env, fetchFn);
+  if (!who) {
+    const login = /^https:\/\//.test(env.LOGIN_URL || '') ? ` <a style="color:#f2c14e" href="${env.LOGIN_URL}">로그인하러 가기</a>` : '';
+    return api ? json({ error: '로그인이 필요합니다' }, 401) : deny(401, `로그인이 필요합니다.${login}<br>로그인한 뒤 이 주소를 다시 열어 주세요.`);
+  }
   let cfg;
   try { cfg = await loadConfig(env, fetchFn); } catch (e) {
     return api ? json({ error: '거래소 자료를 읽지 못했습니다' }, 502) : deny(502, '거래소 자료를 읽지 못했습니다. 잠시 뒤 다시 열어 주세요.');
   }
-  const me = whoami(who.email, cfg, env);
+  const me = whoami(who, cfg, env);
   if (!me.admin && me.id === null) {
     return api ? json({ error: '참가자 명단에 없는 계정입니다' }, 403)
-               : deny(403, `${who.email} 은(는) 참가자 명단에 없습니다. 거래소 주인에게 초대를 요청해 주세요.`);
+               : deny(403, `${who.email || who.login} 은(는) 참가자 명단에 없습니다. 거래소 주인에게 초대를 요청해 주세요.`);
   }
 
   if (path === '/api/me') return json({ id: me.id, name: me.name, admin: me.admin, email: me.email });

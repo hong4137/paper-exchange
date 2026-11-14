@@ -1,0 +1,24 @@
+// 거래소 화면 — sharktalk 개인 서비스 (exchange.sharktalk.co.kr)
+// ★ 개인 계정(sharktalk 가 있는 Cloudflare 계정) 쪽. 티타임즈 업무 계정과 섞지 말 것. 올리기 전에 npx wrangler whoami 로 확인한다.
+// 올리기: npx wrangler deploy  — 순서는 운영-안내.md
+// 주소를 바꾸려면 아래 pattern 한 줄만 고친다 (그 주소가 비어 있고 같은 이름의 워커가 없는지 먼저 확인).
+{
+  "name": "sharktalk-exchange",
+  "main": "site/worker.mjs",
+  "compatibility_date": "2026-10-01",
+  // sharktalk 주소로만 연다 — 로그인이 안 붙은 다른 문(workers.dev, 미리 보기 주소)을 만들지 않는다
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "exchange.sharktalk.co.kr", "custom_domain": true }],
+  // 로그인 판정: sharktalk 인증 워커의 /me 에 쿠키를 넘겨 묻는다 (포털·CIO 노트와 같은 방식, JWT_SECRET 을 나눠 갖지 않는다)
+  "services": [{ "binding": "AUTH_SVC", "service": "sharktalk-auth" }],
+  // 비밀이 아닌 설정. 비밀(GITHUB_TOKEN, ADMIN_EMAILS)은 여기 적지 않고 wrangler secret 으로 넣는다.
+  "vars": {
+    "GITHUB_REPO": "hong4137/paper-exchange",
+    "GITHUB_BRANCH": "main",
+    "AUTH_ME_URL": "https://auth.sharktalk.co.kr/me",
+    "LOGIN_URL": "https://sharktalk.co.kr/"
+  },
+  // 화면 파일. 모든 요청이 워커를 먼저 지난다 — 로그인하지 않은 사람에게는 화면 파일도 나가지 않는다.
+  "assets": { "directory": "./docs", "binding": "ASSETS", "run_worker_first": true }
+}

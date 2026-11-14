@@ -1254,13 +1254,16 @@ def admin_do(cfg, req):
                 raise Refused("이메일이 올바르지 않습니다")
             if email and any(str(p.get("email") or "").lower() == email and p is not cur for p in players):
                 raise Refused("그 이메일은 이미 다른 계좌에 쓰이고 있습니다")
-            if cur:                                       # 이미 있으면 이름·에이전트·이메일만 고친다
+            login = str(req.get("login") or "").strip().lower()[:60] or None      # 로그인하는 곳(sharktalk)에서의 아이디
+            if login and any(str(p.get("login") or "").lower() == login and p is not cur for p in players):
+                raise Refused("그 로그인 아이디는 이미 다른 계좌에 쓰이고 있습니다")
+            if cur:                                       # 이미 있으면 이름·에이전트·이메일·아이디만 고친다
                 cur["name"] = name
-                for k, v in (("agent", agent), ("email", email), ("github", gh or None)):
+                for k, v in (("agent", agent), ("email", email), ("login", login), ("github", gh or None)):
                     if v:
                         cur[k] = v
                 return f"`{pid}` 의 정보를 고쳤습니다 (이름 '{name}')"
-            new = {"id": pid, "github": gh or None, "email": email, "name": name, "agent": agent}
+            new = {"id": pid, "github": gh or None, "email": email, "login": login, "name": name, "agent": agent}
             if gh and gh.lower() == pid:
                 new.pop("id")
             players.append({k: v for k, v in new.items() if v})

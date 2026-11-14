@@ -1,6 +1,6 @@
 // 로그인 있는 화면의 문지기 시험 — 네트워크 없이, 가짜 열쇠와 가짜 저장소로 돈다.
 // 실행: node tests/test_site.mjs
-import { handle, canRead, whoami, _resetCaches } from '../site/lib.mjs';
+import { handle, canRead, whoami, identityFromMe, _resetCaches } from '../site/lib.mjs';
 
 const fails = [];
 const check = (label, cond, detail = '') => {
@@ -118,6 +118,33 @@ check('관리자의 명령은 "[관리]" 이슈로 거래소에 넘어간다', r
       && issue.body.includes('"email":"carol@example.com"') && !issue.body.includes('extra'), JSON.stringify(issue));
 check('모르는 관리 명령은 넘기지 않는다', (await call('/api/admin', 'boss@example.com', { method: 'POST', body: { action: 'drop_all' } })).status === 400);
 check('명단 판단 (직접)', whoami('nobody@example.com', config, env).id === null && whoami('boss@example.com', config, env).main === true);
+r = await call('/api/admin', 'boss@example.com', { method: 'POST', body: { action: 'add_player', id: 'dan', login: 'dan-st' } });
+check('참가자를 sharktalk 아이디로도 넣을 수 있다', r.status === 200 && JSON.parse(calls.find((c) => c.init.method === 'POST').init.body).body.includes('"login":"dan-st"'));
+
+console.log('sharktalk 로그인 (인증 워커의 /me 에 쿠키를 넘겨 묻는다)');
+const sessions = { 'st=boss': { ok: true, user: { email: 'Boss@Example.com', id: 1 } }, 'st=alice': { email: 'alice@example.com' },
+                   'st=carl': { user: { username: 'Carl' } }, 'st=out': { ok: false, user: { email: 'boss@example.com' } } };
+let asked = [];
+const stEnv = { GITHUB_REPO: 'owner/repo', GITHUB_TOKEN: 'tok', ADMIN_EMAILS: 'boss@example.com', LOGIN_URL: 'https://sharktalk.co.kr/',
+  AUTH_SVC: { fetch: async (req) => { asked.push(req.url); const s = sessions[req.headers.get('cookie')]; return s ? Response.json(s) : new Response('', { status: 401 }); } } };
+files['config.json'] = { players: [...config.players, { id: 'carl', name: '칼', login: 'carl' }] };
+_resetCaches();
+const st = async (path, cookie, init = {}) => {
+  const res = await handle(new Request(site + path, { ...init, headers: { ...(cookie ? { Cookie: cookie } : {}), ...(init.headers || {}) } }), stEnv, async () => new Response('화면'), fetchFn);
+  const text = await res.text(); let data; try { data = JSON.parse(text); } catch (e) { data = text; }
+  return { status: res.status, data };
+};
+r = await st('/api/me', 'st=boss');
+check('sharktalk 에 로그인한 관리자를 알아본다', r.status === 200 && r.data.admin === true && r.data.id === 'boss' && asked.at(-1) === 'https://auth.sharktalk.co.kr/me', JSON.stringify(r.data));
+check('sharktalk 에 로그인한 참가자는 자기 계좌만', (await st('/data/accounts/alice.json', 'st=alice')).status === 200 && (await st('/data/league.json', 'st=alice')).status === 403);
+check('이메일 없이 sharktalk 아이디만 오는 경우도 명단의 아이디와 맞춘다', (await st('/api/me', 'st=carl')).data.id === 'carl');
+r = await st('/', null);
+check('쿠키가 없으면 들이지 않고 로그인하러 갈 곳을 알려 준다', r.status === 401 && String(r.data).includes('https://sharktalk.co.kr/'), String(r.data).slice(0, 80));
+check('인증 워커가 모르는 쿠키·로그인 안 됨 응답은 들이지 않는다', (await st('/api/me', 'st=nobody')).status === 401 && (await st('/api/me', 'st=out')).status === 401);
+check('sharktalk 로그인일 때는 Access 토큰을 들고 와도 소용없다', (await handle(new Request(site + '/api/me', { headers: { 'Cf-Access-Jwt-Assertion': await token('boss@example.com') } }),
+      { ...stEnv, ACCESS_TEAM: env.ACCESS_TEAM, ACCESS_AUD: env.ACCESS_AUD }, async () => new Response('화면'), fetchFn)).status === 401);
+check('/me 응답 모양 여러 가지', identityFromMe({ user: { email: 'A@b.c' } }).email === 'a@b.c' && identityFromMe({ data: { login: 'Kim' } }).login === 'kim'
+      && identityFromMe({ sub: 42 }).login === '42' && identityFromMe({ authenticated: false, email: 'a@b.c' }) === null && identityFromMe({}) === null && identityFromMe(null) === null);
 
 console.log(`\n${fails.length ? '실패 ' + fails.length + '건' : '전부 통과'}`);
 process.exit(fails.length ? 1 : 0);
