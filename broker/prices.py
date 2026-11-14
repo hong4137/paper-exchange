@@ -56,17 +56,30 @@ def fetch_yahoo_events(ticker: str, rng="2y"):
     """배당·분할 사건만 받는다 (한국 종목용 — 시세는 다른 곳에서 받는다). 종목 종류는 "type" 에 실어 준다."""
     j = _get(f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range={rng}&interval=1d&events=div%7Csplit")
     r = j["chart"]["result"][0]
-    return {**_events(r, r["meta"].get("gmtoffset", 0)), "type": r["meta"].get("instrumentType")}
+    closes = [c for c in r["indicators"]["quote"][0].get("close") or [] if c]
+    return {**_events(r, r["meta"].get("gmtoffset", 0)), "type": r["meta"].get("instrumentType"),
+            "close": closes[-1] if closes else r["meta"].get("regularMarketPrice")}
 
 
-def fetch_kr_events(code: str):
+def fetch_kr_events(code: str, ref_close=None):
+    """한국 종목의 배당·분할. 야후에서는 코스피가 {코드}.KS, 코스닥이 {코드}.KQ 다.
+    같은 번호로 전혀 다른 상품(펀드 등)이 답하는 일이 있어(2026-11-14 확인: 247540.KS), 종류가 주식·ETF 이고
+    최근 종가가 우리 시세(ref_close)와 10% 안에서 맞는 쪽만 받는다. 맞는 것이 없으면 받지 않는다."""
     last = None
-    for suffix in (".KS", ".KQ"):                       # 코스피 → 코스닥
+    for suffix in (".KS", ".KQ"):
         try:
-            return fetch_yahoo_events(code + suffix)
+            ev = fetch_yahoo_events(code + suffix)
         except Exception as e:
             last = e
-    raise last
+            continue
+        if str(ev.get("type") or "").upper() not in ("EQUITY", "ETF"):
+            last = ValueError(f"{code}{suffix} 는 주식·ETF 가 아님 ({ev.get('type')})")
+            continue
+        if ref_close and ev.get("close") and abs(ev["close"] / ref_close - 1) > 0.1:
+            last = ValueError(f"{code}{suffix} 값이 우리 시세와 다름 ({ev['close']} vs {ref_close})")
+            continue
+        return {**ev, "ticker": code + suffix}
+    raise last or ValueError("자료 없음")
 
 
 ETF_BRANDS = ("KODEX", "TIGER", "RISE", "KBSTAR", "ACE", "KINDEX", "PLUS", "ARIRANG", "SOL", "HANARO", "KOSEF", "KIWOOM",
@@ -81,7 +94,7 @@ def kr_kind(name: str, yahoo_type=None):
     """한국 종목이 ETF 인지. 반환 (kind, 근거). 야후가 알려 준 종목 종류가 없으면 이름의 운용사 상표로 어림한다."""
     t = str(yahoo_type or "").upper()
     if t:
-        return ("etf" if t in ("ETF", "ETN", "MUTUALFUND") else "stock"), KIND_SRC
+        return ("etf" if t == "ETF" else "stock"), KIND_SRC
     return ("etf" if str(name).upper().startswith(tuple(b.upper() for b in ETF_BRANDS)) else "stock"), "이름으로 어림"
 
 
@@ -150,10 +163,10 @@ def update(home: Path, key: str, now: datetime):
         market, ccy = "KR", "KRW"
         bars, name = fetch_daum(key, now)
         try:
-            new_ev = fetch_kr_events(key)
-            ev_note = "야후"
+            new_ev = fetch_kr_events(key, bars[-1]["c"] if bars else None)
+            ev_note = f"야후 {new_ev['ticker']}"
         except Exception as e:                           # 사건을 못 받아도 시세 갱신은 계속한다
-            ev_note = f"받지 못함 ({type(e).__name__})"
+            ev_note = f"받지 못함 ({str(e)[:60] or type(e).__name__})"
         if kind_src != KIND_SRC or (new_ev or {}).get("type"):
             kind, kind_src = kr_kind(name, (new_ev or {}).get("type"))
     else:

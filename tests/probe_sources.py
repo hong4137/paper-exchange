@@ -49,13 +49,13 @@ def events(label_fn):
     ev = label_fn()
     dv, sp = ev["dividends"], ev["splits"]
     last = max(dv) if dv else None
-    return (f"종류 {ev.get('type')}, 배당 {len(dv)}건" + (f" (마지막 {last} 주당 {dv[last]})" if last else "")
+    return (f"{ev.get('ticker') or ''} 종류 {ev.get('type')}, 최근 종가 {ev.get('close')}, 배당 {len(dv)}건 {sorted(dv.items())[-4:]}" + (f" (마지막 {last} 주당 {dv[last]})" if last else "")
             + f", 분할 {len(sp)}건" + (f" {sorted(sp.items())[-1]}" if sp else ""))
 
 
 def kind(code):
     c = px.load(home, code) or px.update(home, code, now)
-    return f"{c['name']} → {c.get('kind')} ({c.get('kind_src')}), 배당·분할 자료: {c.get('events_note')}"
+    return f"{c['name']} 종가 {c['bars'][-1]['c']} → {c.get('kind')} ({c.get('kind_src')}), 배당·분할 자료: {c.get('events_note')}"
 
 
 print(f"시각 {now:%Y-%m-%d %H:%M} (한국)")
@@ -73,7 +73,8 @@ print("배당·액면분할 (야후 events)")
 probe("미국 종목 (AAPL, 5년)", lambda: events(lambda: px.fetch_yahoo_events("AAPL", "5y")))
 probe("미국 종목 분할 (NVDA, 5년)", lambda: events(lambda: px.fetch_yahoo_events("NVDA", "5y")))
 probe("한국 코스피 종목 (005930)", lambda: events(lambda: px.fetch_kr_events("005930")))
-probe("한국 코스닥 종목 (247540)", lambda: events(lambda: px.fetch_kr_events("247540")))
+probe("한국 코스닥 종목 — 같은 번호의 다른 상품을 걸러 내는지 (247540)",
+      lambda: events(lambda: px.fetch_kr_events("247540", px.update(home, "247540", now)["bars"][-1]["c"])))
 probe("한국 ETF 분배금 (069500)", lambda: events(lambda: px.fetch_kr_events("069500")))
 print("한국 종목이 ETF 인지 (매도 거래세가 다르다)")
 probe("주식 (005930)", lambda: kind("005930"))
