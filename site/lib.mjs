@@ -1,4 +1,4 @@
-// 로그인 있는 화면(Cloudflare Pages + Access)의 문지기. functions/_middleware.js 가 모든 요청을 여기로 넘긴다.
+// 로그인 있는 화면(sharktalk 주소 — Cloudflare Workers + Access)의 문지기. site/worker.mjs 가 모든 요청을 여기로 넘긴다.
 //
 // 하는 일
 //   1. 로그인 확인: Cloudflare Access 가 붙여 주는 서명된 토큰을 검증하고 이메일을 꺼낸다.
@@ -7,7 +7,7 @@
 //   4. 주문 받기: /api/order → 저장소의 inbox/{계좌}/ 에 요청 파일을 올린다 (거래소의 주문 창구가 접수한다).
 //   5. 관리: /api/admin → 저장소에 "[관리]" 이슈를 연다 (거래소가 주인 계정의 이슈로 처리한다).
 //
-// 환경변수 (Cloudflare Pages 설정)
+// 환경변수 (wrangler.toml 의 [vars] 와 wrangler secret)
 //   ACCESS_TEAM   예: myteam.cloudflareaccess.com        ACCESS_AUD   Access 애플리케이션의 Audience 값
 //   GITHUB_REPO   예: hong4137/paper-exchange            GITHUB_TOKEN 그 저장소의 Contents·Issues 읽기/쓰기 토큰 (비밀)
 //   ADMIN_EMAILS  관리자 이메일 (쉼표로 여럿)             GITHUB_BRANCH 기본 main

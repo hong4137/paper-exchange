@@ -54,8 +54,9 @@ docs/index.html       거래소 화면 — 계좌 하나 (성적·잔고·전표
 docs/admin.html       관리자 화면 — 모든 계좌의 수익률을 한 표로 (docs/data/league.json 을 읽는다). 거래소 화면에서 오는 길은 없다
 docs/data/league.json 전체 계좌 수익률(기간별·대회) / docs/data/accounts/{계정}.json 계좌별 화면 자료 (주인 계좌도 한 벌 들어 있다)
 참가-안내.md          초대받은 사람이 읽는 글 — 주문하는 법
-운영-안내.md          거래소 주인이 읽는 글 — 로그인 있는 곳(Cloudflare)으로 옮기고 저장소를 비공개로 돌리는 순서
-functions/_middleware.js  로그인 있는 화면의 문지기 (Cloudflare Pages 가 모든 요청 앞에서 부른다) — 하는 일은 site/lib.mjs
+운영-안내.md          거래소 주인이 읽는 글 — 화면을 sharktalk 주소로 옮기고(로그인 붙이기) 저장소를 비공개로 돌리는 순서
+wrangler.toml         화면을 `exchange.sharktalk.co.kr` 에 올리는 설정 (Cloudflare Workers, 사용자 PC 에서 `npx wrangler deploy`)
+site/worker.mjs       sharktalk 쪽에서 모든 요청을 먼저 받는 문 — 하는 일은 site/lib.mjs
 site/lib.mjs          문지기: 로그인 확인, 자기 계좌 자료만 내주기, 주문 양식 → inbox/{이름표}/, 관리 양식 → [관리] 이슈
 tests/test_site.mjs   문지기 시험 (가짜 로그인 열쇠·가짜 저장소, node 로 돈다)
 docs/data/demo.json   화면 확인용 자료 (index.html?demo). tests/make_demo_real.py 로 다시 만든다
@@ -112,9 +113,12 @@ inbox/                주문 창구 — 운용자가 올린 주문 요청 파일
 - 명단·주문 이슈·같은 조건은 사용자가 고르지 않아 **내가 정한 기본값**이다. 바꾸려면 사용자에게 묻는다.
   실제로 대회를 열 때 물을 것: 대기 주문을 남에게 가릴지, 한 사람이 계좌를 여럿 가질 수 있는지, 대회용으로 새 계좌에서 다 같이 출발할지.
 
-### 진짜 로그인 (사용자 결정 2026-11-14 — 프로그램은 만들었고, 실제로 올려 보지는 못했다)
-사용자는 관리자 화면을 "진짜 로그인(저장소 비공개)"으로 잠그기로 했고, 걸림돌을 듣고도 지금 만들기로 했다. 옮기는 순서는 `운영-안내.md`(사용자가 직접 한다).
-- **구도**: 화면은 Cloudflare Pages(비공개 저장소도 올릴 수 있다), 로그인은 Cloudflare Access. 모든 요청은 문지기 `functions/_middleware.js` → `site/lib.mjs` 를 지난다.
+### 진짜 로그인 — 화면은 sharktalk 로 (사용자 결정 2026-11-14 — 프로그램은 만들었고, 실제로 올려 보지는 못했다)
+사용자는 관리자 화면을 "진짜 로그인(저장소 비공개)"으로 잠그기로 했고, 걸림돌을 듣고도 지금 만들기로 했다. 이어서 **"결국 사이트는 sharktalk 로 서빙해야 한다"** 고 했다.
+`sharktalk.co.kr` 은 사용자의 도메인이고 Cloudflare 에 물려 있다(바둑 사이트 `baduk.sharktalk.co.kr` 을 사용자 PC 에서 `wrangler` 로 Workers 에 올린 기록이 있다 — Worker 이름 `sharktalk-baduk`).
+거래소 화면도 같은 방식으로 `exchange.sharktalk.co.kr` 에 올린다(주소 이름은 내가 임시로 정했다 — `wrangler.toml` 의 `pattern`). 옮기는 순서는 `운영-안내.md`(사용자가 자기 PC 에서 직접 한다).
+- **구도**: 화면은 Cloudflare Workers(`wrangler.toml`, 화면 파일은 `docs/`), 로그인은 Cloudflare Access. 모든 요청이 먼저 문지기 `site/worker.mjs` → `site/lib.mjs` 를 지난다(`run_worker_first`).
+  `workers.dev` 주소와 미리 보기 주소는 끈다 — 로그인이 안 붙은 다른 문을 만들지 않는다. 자료 폴더(`docs/data`)는 올리지 않는다(`docs/.assetsignore`) — 자료는 문지기가 저장소에서 읽어 준다.
   거래소(GitHub 자동 실행·장부)는 그대로다. 로그인이 없는 GitHub Pages 에서도 화면은 예전처럼 돈다(`api/me` 가 없으면 양식이 안 나올 뿐).
 - **문지기가 하는 일**(`site/lib.mjs`):
   ① Access 가 붙인 토큰의 서명·대상(`ACCESS_AUD`)·발급처·기한을 확인하고 이메일을 꺼낸다. 설정이 비어 있으면 아무도 들이지 않는다.
@@ -124,13 +128,14 @@ inbox/                주문 창구 — 운용자가 올린 주문 요청 파일
   ⑤ `/api/admin`(관리자만) → 저장소에 `[관리]` 이슈를 연다. 토큰 주인 = 거래소 주인이라 거래소가 주인의 명령으로 받는다.
 - **명단**에 `id`(이름표 — GitHub 계정이 없는 사람용)와 `email`(로그인 이메일)이 더해졌다. 이름표가 계좌 폴더·화면 주소의 이름이다. 이메일은 화면 자료(`state.json`·`league.json`)에 싣지 않는다.
   **저장소가 공개인 동안에는 명단에 이메일을 넣지 않는다**(누구에게나 보인다).
-- **비밀**: GitHub 토큰과 관리자 이메일은 Cloudflare 설정에만 있다. 저장소·화면 자료·이 대화에 넣지 않는다.
-- **조사로 확인한 것**(2026-11-14 검색): Cloudflare Pages 는 무료로 비공개 저장소를 올릴 수 있고 한 달 500번까지 다시 올린다(developers.cloudflare.com/pages/platform/limits).
+- **비밀**: GitHub 토큰·로그인 값·관리자 이메일은 `wrangler secret` 으로 Cloudflare 에만 넣는다. 저장소(`wrangler.toml` 포함)·화면 자료·대화에 넣지 않는다.
+- **조사로 확인한 것**(2026-11-14 검색): Workers 의 화면 파일 설정에서 `run_worker_first = true` 면 모든 요청이 Worker 를 먼저 지난다. 기본값은 화면 파일을 먼저 내주는 것이라 꼭 켜야 한다.
+  `[assets]` 표 아래에 적은 설정은 그 표 안의 것으로 읽혀 무시된다(developers.cloudflare.com/workers/static-assets/ , /workers/static-assets/routing/worker-script/).
   Access 가 넘겨주는 토큰은 서명을 확인해야 하고 이메일이 들어 있다(developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/application-token/).
   개인 계정의 비공개 저장소는 협업자에게 쓰기 권한만 줄 수 있다(docs.github.com "Permission levels for a personal account repository") — 그래서 비공개가 되면 참가자는 주문 이슈를 못 열고 화면의 주문 양식으로 주문한다.
-- **확인 못 한 것**: 실제 Cloudflare 에서의 동작 전부(문지기가 정적 파일 요청 앞에서도 도는지, `functions/` 밖의 `site/lib.mjs` 를 함께 묶어 주는지, 메뉴 이름).
+- **확인 못 한 것**: 실제 Cloudflare 에서의 동작 전부. `wrangler.toml` 의 주소 연결 줄(`routes … custom_domain`)과 `.assetsignore` 는 기억으로 썼다 — 사용자의 바둑 폴더 설정과 견줘 봐야 한다.
   Access 무료 인원 한도. 비공개 저장소의 GitHub 자동 실행 무료 한도(개인 계정 한 달 2,000분으로 알고 있다) — 매시 실행 + 아침 장전 수집을 합치면 닿을 수 있다.
-  거래소가 매시 자료를 올릴 때마다 Cloudflare 가 화면을 다시 올리면 500번 한도를 넘는다 → `운영-안내.md` 에 "바뀐 경로를 가려서 올리기" 설정을 적어 두었다(그 설정 이름도 확인 못 했다).
+- 화면 파일이나 문지기를 고치면 사용자가 PC 에서 `npx wrangler deploy` 를 다시 해야 sharktalk 에 반영된다(자료는 다시 올릴 필요 없다). 이 세션에서는 올릴 수 없다.
 - 로그인 있는 주소로 옮기기 전까지 `docs/admin.html` 은 잠기지 않은 화면이다.
 
 ## 체결 방식 (2026-11-14 1분 단위로 바꿈 — 주문이 한 건도 없을 때)
