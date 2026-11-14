@@ -151,6 +151,7 @@ tr:last-child td{border-bottom:0}
 .league a{text-decoration:none; font-weight:700; border-bottom:1px dotted var(--dim)}
 .league .who{font-size:12px; color:var(--dim); font-weight:400}
 .league svg{width:90px; height:26px; vertical-align:middle}
+.league h3.ct{margin:22px 0 8px; font-size:16px} .league h3.ct small{font-size:12.5px; font-weight:400; color:var(--dim); margin-left:6px}
 .back{display:inline-block; margin:14px 0 0; font-size:13.5px; color:var(--dim)}
 .feed time{display:block; font-size:12px; color:var(--dim)}
 .more{font:inherit; margin-top:4px; background:transparent; color:var(--dim); border:1px solid var(--line); border-radius:99px; padding:6px 14px; cursor:pointer}
@@ -194,7 +195,7 @@ const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&g
 const when=ts=>{const d=new Date(ts);return d.toLocaleString('ko-KR',{month:'numeric',day:'numeric',weekday:'short',hour:'2-digit',minute:'2-digit',hour12:false,timeZone:'Asia/Seoul'})};
 const KIND={weekly:'주간 보고',monthly:'월간 보고',special:'임시 보고'};
 const STATUS={filled:'체결',partial:'일부',pending:'대기',rejected:'거부',expired:'만료',canceled:'취소'};
-let S=null, L=null, filter='all', feedAll=false;
+let S=null, L=null, filter='all', feedAll=false, period='all';
 const ACC=(new URLSearchParams(location.search).get('a')||'').toLowerCase().replace(/[^a-z0-9-]/g,'');
 
 function spark(v, base){
@@ -204,24 +205,51 @@ function spark(v, base){
   const col=v[v.length-1]>base?'#ff5b62':v[v.length-1]<base?'#4d8dff':'#9aa6c2';
   return `<svg viewBox="0 0 ${W} ${H}" aria-hidden="true"><polyline points="${pts}" fill="none" stroke="${col}" stroke-width="1.5"/></svg>`;
 }
+const pp=n=>(n==null?'—':(n>0?'+':'')+n.toFixed(2)+'%p');
 function renderLeague(){
   if(!L||!L.players||!L.players.length){ $('#league').innerHTML=''; return; }
   const cur=ACC||(S&&S.player&&S.player.id)||'';
-  $('#league').innerHTML=`<section class="league"><h2>${esc(L.name)} 순위 <small>참가 ${L.players.length}명 · 같은 시작 금액 ${won(L.initial)}원 · 수익률 순</small></h2>
-    <p class="sub">이름을 누르면 그 계좌의 보유 종목과 주문 전표가 아래에 나옵니다.</p>
-    <div class="tblwrap"><table><thead><tr><th>순위</th><th>참가자</th><th>수익률</th><th>총자산</th><th class="c3">비교 기준보다</th><th class="c3">보유</th><th class="c3">주문</th><th class="c3">흐름</th></tr></thead><tbody>
-    ${L.players.map(p=>`<tr class="${p.id===cur?'me':''}">
-      <td class="rk num">${p.rank}</td>
-      <td><a href="?a=${encodeURIComponent(p.id)}">${esc(p.name)}</a>${p.agent?` <span class="who">· ${esc(p.agent)}</span>`:''}${p.integrity_ok?'':' <span class="tag bad">장부 맞지 않음</span>'}</td>
-      <td class="num ${cls(p.pnl_pct)}">${pct(p.pnl_pct)}</td>
+  const ret=p=>period==='all'?{pct:p.pnl_pct,excess_pct:p.excess_pct}:((p.returns||{})[period]||null);
+  const rows=L.players.map(p=>({p,r:ret(p)})).sort((x,y)=>((y.r?y.r.pct:-1e9)-(x.r?x.r.pct:-1e9))||x.p.id.localeCompare(y.p.id));
+  let rk=0; rows.forEach((x,i)=>{ x.rank=!x.r?'—':(i&&rows[i-1].r&&rows[i-1].r.pct===x.r.pct?rows[i-1].rank:(rk=i+1)); });
+  const chips=(L.periods||[]).filter(k=>k.key==='all'||L.players.some(p=>(p.returns||{})[k.key]));
+  const who=p=>`<a href="?a=${encodeURIComponent(p.id)}">${esc(p.name)}</a>${p.agent?` <span class="who">· ${esc(p.agent)}</span>`:''}`;
+  const contests=(L.contests||[]).map(c=>`<h3 class="ct">${esc(c.name)} <small>${c.start} ~ ${c.end||'끝 없음'} · ${c.status}</small></h3>
+    ${c.players.length?`<div class="tblwrap"><table><thead><tr><th>순위</th><th>참가자</th><th>이 기간 수익률</th><th class="c3">비교 기준보다</th><th class="c3">잰 기간</th></tr></thead><tbody>
+      ${c.players.map(x=>`<tr class="${x.id===cur?'me':''}"><td class="rk num">${x.rank}</td><td>${who(x)}</td>
+        <td class="num ${cls(x.pct)}">${pct(x.pct)}</td><td class="num c3 ${cls(x.excess_pct)}">${pp(x.excess_pct)}</td>
+        <td class="num c3">${x.from} ~ ${x.to}${x.late?' · 늦게 들어옴':''}</td></tr>`).join('')}
+    </tbody></table></div>`:`<div class="empty">아직 시작하지 않았습니다.</div>`}`).join('');
+  $('#league').innerHTML=`<section class="league"><h2>${esc(L.name)} 순위 <small>${L.players.length}명 · 같은 시작 금액 ${won(L.initial)}원 · 수익률 순</small></h2>
+    <p class="sub">이름을 누르면 그 계좌의 성적과 보유 종목, 주문 전표가 아래에 나옵니다. 기간을 바꾸면 그 기간의 수익률로 다시 줄을 세웁니다.</p>
+    ${chips.length>1?`<div class="chips">${chips.map(k=>`<button class="chip pd ${period===k.key?'on':''}" data-p="${k.key}">${k.label}</button>`).join('')}</div>`:''}
+    <div class="tblwrap"><table><thead><tr><th>순위</th><th>참가자</th><th>수익률</th><th>총자산</th><th class="c3">비교 기준보다</th><th class="c3">최대 낙폭</th><th class="c3">보유</th><th class="c3">흐름</th></tr></thead><tbody>
+    ${rows.map(({p,r,rank})=>`<tr class="${p.id===cur?'me':''}">
+      <td class="rk num">${rank}</td>
+      <td>${who(p)}${p.integrity_ok?'':' <span class="tag bad">장부 맞지 않음</span>'}</td>
+      <td class="num ${cls(r?r.pct:0)}">${r?pct(r.pct):'—'}</td>
       <td class="num">${won(p.total)}원</td>
-      <td class="num c3 ${cls(p.excess_pct)}">${p.excess_pct==null?'—':(p.excess_pct>0?'+':'')+p.excess_pct.toFixed(2)+'%p'}</td>
+      <td class="num c3 ${cls(r?r.excess_pct:0)}">${r?pp(r.excess_pct):'—'}</td>
+      <td class="num c3 ${cls(p.max_drawdown_pct)}">${p.max_drawdown_pct==null?'—':p.max_drawdown_pct.toFixed(2)+'%'}</td>
       <td class="num c3">${p.n_positions}종목</td>
-      <td class="num c3">${p.n_orders}건</td>
       <td class="c3">${spark(p.curve,L.initial)}</td></tr>`).join('')}
-    </tbody></table></div></section>`;
+    </tbody></table></div>${contests}</section>`;
+  document.querySelectorAll('.chip.pd').forEach(b=>b.onclick=()=>{period=b.dataset.p;renderLeague()});
 }
-
+function perfSection(){
+  const P=S.performance; if(!P) return '';
+  const m=P.max_drawdown||{};
+  return `<section><h2>성적</h2><p class="sub">넣고 빼는 돈이 없으므로, 어느 기간이든 끝 날의 총자산을 시작 전날의 총자산으로 나눠 잽니다. 계좌가 그 기간보다 젊으면 줄이 나오지 않습니다.</p>
+    <div class="tblwrap"><table><thead><tr><th>기간</th><th>이 계좌</th><th>반반 넣어 뒀다면</th><th>차이</th><th class="c3">잰 날짜</th></tr></thead><tbody>
+    ${P.periods.map(x=>`<tr><td>${x.label}</td><td class="num ${cls(x.pct)}">${pct(x.pct)}</td><td class="num ${cls(x.bench_pct)}">${pct(x.bench_pct)}</td>
+      <td class="num ${cls(x.excess_pct)}">${pp(x.excess_pct)}</td><td class="num c3">${x.from} ~ ${x.to}</td></tr>`).join('')}
+    </tbody></table></div>
+    <div class="kpis" style="grid-template-columns:repeat(3,1fr)">
+      <div class="kpi"><div class="k">최대 낙폭</div><div class="v num ${cls(m.pct)}">${(m.pct||0).toFixed(2)}%</div><div class="s num">${m.pct<0&&m.from?`${m.from} 고점 → ${m.to}`:'고점에서 내려간 적 없음'}</div></div>
+      <div class="kpi"><div class="k">가장 좋았던 날 · 나빴던 날</div><div class="v num"><span class="${cls(P.best_day_pct)}">${pct(P.best_day_pct)}</span> · <span class="${cls(P.worst_day_pct)}">${pct(P.worst_day_pct)}</span></div><div class="s num">잰 날 수 ${P.days}일</div></div>
+      <div class="kpi"><div class="k">하루 수익률의 흔들림</div><div class="v num">${P.daily_vol_pct==null?'—':P.daily_vol_pct.toFixed(2)+'%'}</div><div class="s">${P.daily_vol_pct==null?'닷새치가 쌓이면 나옵니다':'하루 수익률의 표준편차'}</div></div>
+    </div></section>`;
+}
 function curve(eq){
   const W=1000,H=300,pad=8;
   const pts=eq.length>1?eq:[eq[0],eq[0]];
@@ -341,6 +369,8 @@ function render(){
     <div class="kpi"><div class="k">주문</div><div class="v num">${s.n_orders}건</div><div class="s">체결 ${s.n_filled} · 대기 ${s.n_pending}</div></div>
     <div class="kpi"><div class="k">지금까지 낸 비용</div><div class="v num">${won(s.fees_krw)}원</div><div class="s num">받은 배당 ${won(dv.net_krw)}원</div></div>
   </div>
+
+  ${perfSection()}
 
   <section><h2>보유 종목</h2><p class="sub">지금 들고 있는 것과 산 값 대비 손익입니다.</p>
     ${S.positions.length?`<div class="pos">${S.positions.map(p=>`

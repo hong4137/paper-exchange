@@ -14,7 +14,8 @@ ROOT = Path(__file__).resolve().parent.parent
 BROKER = ROOT / "broker" / "broker.py"
 tmp = Path(tempfile.mkdtemp(prefix="paper_league_"))
 cfg = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
-cfg.update({"league": {"name": "시험 대회"},
+cfg.update({"league": {"name": "시험 대회", "contests": [{"name": "이틀 대회", "start": "2026-11-03", "end": "2026-11-04"},
+                                                    {"name": "다음 달 대회", "start": "2026-12-01", "end": "2026-12-31"}]},
             "players": [{"github": "Owner-Kim", "name": "주인", "main": True},
                         {"github": "alice", "name": "앨리스", "agent": "시험 에이전트"},
                         {"github": "Bob99", "name": "밥"},
@@ -121,6 +122,40 @@ check("순위표: 수익률 순 (오른 종목을 산 앨리스 1위, 아무것�
       [(x["rank"], x["id"]) for x in rows] == [(1, "alice"), (2, "bob99"), (3, "owner-kim")] and lg["name"] == "시험 대회", str([(x["rank"], x["id"], x["pnl_pct"]) for x in rows]))
 check("순위표 숫자는 계좌 화면 자료와 같다", rows[0]["total"] == al["summary"]["total"] and rows[0]["pnl_pct"] == al["summary"]["pnl_pct"]
       and rows[0]["name"] == "앨리스" and rows[0]["n_positions"] == 1)
+# 수익률 재기: 기간 수익률 = 끝 날 총자산 ÷ 시작 전날 총자산 − 1
+eq = {e["d"]: e["total"] for e in al["equity"]}
+pf = {p["key"]: p for p in al["performance"]["periods"]}
+check("처음부터의 수익률은 시작 금액 기준이고 요약의 수익률과 같다", pf["all"]["pct"] == al["summary"]["pnl_pct"] and pf["all"]["from_open"]
+      and pf["all"]["from"] == "2026-11-02" and pf["all"]["to"] == "2026-11-04", str(pf["all"]))
+check("계좌가 그 기간보다 젊으면 '최근 1주' 같은 칸은 비워 둔다", "w1" not in pf and "m1" not in pf and "ytd" in pf, str(list(pf)))
+check("최대 낙폭: 오르기만 한 계좌는 0, 내리기만 한 계좌는 시작 금액부터 잰다", al["performance"]["max_drawdown"]["pct"] == 0
+      and own["performance"]["max_drawdown"]["pct"] == own["summary"]["pnl_pct"], str(own["performance"]["max_drawdown"]))
+cs = {c["name"]: c for c in lg["contests"]}
+c1 = {x["id"]: x for x in cs["이틀 대회"]["players"]}
+want = round((eq["2026-11-04"] / eq["2026-11-02"] - 1) * 100, 2)
+check("대회 = 이름 붙인 기간: 시작 전날(11-02) 총자산을 기준으로 그 기간만 잰다", c1["alice"]["pct"] == want and c1["alice"]["rank"] == 1
+      and not c1["alice"]["late"] and c1["alice"]["to"] == "2026-11-04" and cs["이틀 대회"]["status"] == "끝남", f"{c1['alice']} vs {want}")
+check("대회 순위는 전체 순위와 따로 매긴다", [x["id"] for x in cs["이틀 대회"]["players"]] == ["alice", "bob99", "owner-kim"])
+check("아직 시작하지 않은 대회는 '예정'이고 순위가 비어 있다", cs["다음 달 대회"]["status"] == "예정" and cs["다음 달 대회"]["players"] == [])
+check("순위표에 기간별 수익률이 실린다", rows[0]["returns"]["all"]["pct"] == al["summary"]["pnl_pct"] and rows[0]["max_drawdown_pct"] == 0)
+
+# 수익률 계산을 숫자로 직접 확인 (가짜 자산 곡선)
+os.environ["PAPER_HOME"] = str(tmp)
+sys.path.insert(0, str(ROOT / "broker"))
+import broker as bk  # noqa: E402
+curve = [{"d": f"2026-0{m}-{d:02d}", "total": t, "bench": b} for m, d, t, b in [
+    (1, 5, 100, 100), (1, 6, 110, 100), (1, 7, 99, 102), (2, 2, 120, 105), (2, 5, 132, 105), (2, 6, 132, 110), (2, 9, 138.6, 110)]]
+r = bk.span_return(curve, 100, "2026-02-05", "2026-02-06")
+check("기간 수익률: 2-05~2-06 은 2-02 의 120 을 기준으로 +10%, 비교 기준은 105→110", r["pct"] == 10.0 and r["bench_pct"] == 4.76
+      and r["excess_pct"] == 5.24 and not r["late"], str(r))
+r = bk.span_return(curve, 100, "2025-12-01", "2026-01-06")
+check("기간이 계좌보다 먼저 시작하면 시작 금액을 기준으로 재고 늦게 들어온 것으로 표시", r["pct"] == 10.0 and r["late"] and r["from"] == "2026-01-05", str(r))
+check("자료가 없는 기간은 재지 않는다", bk.span_return(curve, 100, "2026-03-01") is None)
+pfm = bk.performance(curve, 100)
+k = {p["key"]: p for p in pfm["periods"]}
+check("최근 1주(2-03~2-09)는 2-02 의 120 기준 +15.5%, 처음부터는 +38.6%", k["w1"]["pct"] == 15.5 and k["all"]["pct"] == 38.6 and k["m1"]["pct"] == 40.0, str(k))
+check("최대 낙폭: 110 → 99 = -10%", pfm["max_drawdown"] == {"pct": -10.0, "from": "2026-01-06", "to": "2026-01-07"}, str(pfm["max_drawdown"]))
+
 check("모든 장부의 지문이 맞는다", run(WED, "verify").returncode == 0)
 led = tmp / "accounts" / "alice" / "ledger.jsonl"
 led.write_text(led.read_text(encoding="utf-8").replace('"qty": 100', '"qty": 900'), encoding="utf-8")

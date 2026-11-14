@@ -126,6 +126,78 @@ def open_missing():
     use(here)
 
 
+# ---------- 수익률 재기 ----------
+# 넣고 빼는 돈이 없으므로 기간 수익률 = 끝 날의 총자산 ÷ 시작 전날의 총자산 − 1. 자산 곡선(하루 한 점)에서 바로 나온다.
+PERIODS = [("w1", "최근 1주", 7), ("m1", "최근 1개월", 30), ("m3", "최근 3개월", 91), ("m6", "최근 6개월", 182), ("y1", "최근 1년", 365)]
+
+
+def _point_before(equity, date, inclusive=True):
+    """date 이하(또는 미만)의 마지막 자산 곡선 점."""
+    best = None
+    for e in equity:
+        if e["d"] < date or (inclusive and e["d"] == date):
+            best = e
+        else:
+            break
+    return best
+
+
+def span_return(equity, initial, start, end=None):
+    """start 날부터 end 날까지의 수익률. 기준은 start 전날의 총자산 — 계좌를 start 뒤에 열었으면 시작 금액(늦게 들어온 것으로 표시).
+    반환 {from, to, pct, bench_pct, excess_pct, from_open(시작 금액 기준인가), late(start 뒤에 연 계좌인가)} 또는 None(그 기간에 자료가 없다)."""
+    if not equity:
+        return None
+    last = _point_before(equity, end) if end else equity[-1]
+    if last is None or last["d"] < start:
+        return None
+    base = _point_before(equity, start, inclusive=False)
+    from_open = base is None
+    b_total, b_bench = (initial, initial) if from_open else (base["total"], base["bench"])
+    pct = round((last["total"] / b_total - 1) * 100, 2) if b_total else None
+    bench = round((last["bench"] / b_bench - 1) * 100, 2) if last.get("bench") and b_bench else None
+    return {"from": equity[0]["d"] if from_open else start, "to": last["d"], "pct": pct, "bench_pct": bench,
+            "excess_pct": None if pct is None or bench is None else round(pct - bench, 2),
+            "from_open": from_open, "late": equity[0]["d"] > start}
+
+
+def performance(equity, initial):
+    """계좌 하나의 성적: 기간별 수익률(비교 기준과 나란히), 최대 낙폭, 하루 수익률의 흔들림."""
+    if not equity:
+        return None
+    last_d = datetime.strptime(equity[-1]["d"], "%Y-%m-%d")
+    out = []
+    for key, label, days in PERIODS:
+        start = (last_d - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+        r = span_return(equity, initial, start)
+        if r and not r["from_open"]:                    # 계좌가 그 기간보다 젊으면 비워 둔다
+            out.append({"key": key, "label": label, **r})
+    r = span_return(equity, initial, f"{last_d.year}-01-01")
+    if r:
+        out.append({"key": "ytd", "label": "올해", **r})
+    r = span_return(equity, initial, equity[0]["d"])
+    out.append({"key": "all", "label": "처음부터", **r})
+    # 최대 낙폭: 지나온 가장 높은 총자산에서 가장 많이 내려간 폭
+    peak, peak_d, mdd = initial, equity[0]["d"], {"pct": 0.0, "from": None, "to": None}
+    rets, prev = [], initial
+    for e in equity:
+        if e["total"] > peak:
+            peak, peak_d = e["total"], e["d"]
+        dd = (e["total"] / peak - 1) * 100 if peak else 0
+        if dd < mdd["pct"]:
+            mdd = {"pct": round(dd, 2), "from": peak_d, "to": e["d"]}
+        if prev:
+            rets.append(e["total"] / prev - 1)
+        prev = e["total"]
+    rets = rets[1:]                                     # 첫 점은 시작 금액과의 차이라 하루 수익률이 아니다
+    vol = None
+    if len(rets) >= 5:
+        m = sum(rets) / len(rets)
+        vol = round(math.sqrt(sum((x - m) ** 2 for x in rets) / (len(rets) - 1)) * 100, 2)
+    return {"periods": out, "max_drawdown": mdd, "daily_vol_pct": vol, "days": len(equity),
+            "best_day_pct": round(max(rets) * 100, 2) if rets else None,
+            "worst_day_pct": round(min(rets) * 100, 2) if rets else None}
+
+
 def build_league():
     """순위표: 계좌별 화면 자료에서 한 줄씩 뽑아 수익률 순으로."""
     cfg, rows = config(), []
@@ -141,12 +213,36 @@ def build_league():
                      "excess_pct": None if s["bench_pct"] is None else round(s["pnl_pct"] - s["bench_pct"], 2),
                      "cash_pct": s["cash_pct"], "n_positions": len(st["positions"]), "n_orders": s["n_orders"],
                      "n_filled": s["n_filled"], "fees_krw": s["fees_krw"], "integrity_ok": st["integrity"]["ok"],
-                     "curve": [e["total"] for e in st["equity"]][-120:]})
-    rows.sort(key=lambda r: (-r["pnl_pct"], r["id"]))
-    for i, r in enumerate(rows):                        # 수익률이 같으면 같은 순위
-        r["rank"] = rows[i - 1]["rank"] if i and rows[i - 1]["pnl_pct"] == r["pnl_pct"] else i + 1
+                     "returns": {p["key"]: p for p in (st.get("performance") or {}).get("periods", [])},
+                     "max_drawdown_pct": ((st.get("performance") or {}).get("max_drawdown") or {}).get("pct"),
+                     "curve": [e["total"] for e in st["equity"]][-120:], "_equity": st["equity"], "_initial": st["initial"]})
+
+    def ranked(items, key):                             # 수익률 순, 같으면 같은 순위
+        items.sort(key=lambda r: (-(key(r) if key(r) is not None else -1e9), r["id"]))
+        for i, r in enumerate(items):
+            r["rank"] = items[i - 1]["rank"] if i and key(items[i - 1]) == key(r) else i + 1
+        return items
+
+    ranked(rows, lambda r: r["pnl_pct"])
+    # 대회 = 이름 붙인 기간. 계좌를 새로 열지 않고, 같은 자산 곡선에서 그 기간의 수익률만 잰다.
+    today, contests = now().date().isoformat(), []
+    for c in (cfg.get("league") or {}).get("contests") or []:
+        start, end = c.get("start"), c.get("end")
+        if not start:
+            continue
+        entries = []
+        for r in rows:
+            sr = span_return(r["_equity"], r["_initial"], start, end)
+            if sr:
+                entries.append({"id": r["id"], "name": r["name"], "agent": r["agent"], **sr})
+        contests.append({"name": c.get("name") or "대회", "start": start, "end": end,
+                         "status": "예정" if today < start else ("끝남" if end and today > end else "진행 중"),
+                         "players": ranked(entries, lambda r: r["pct"])})
+    for r in rows:
+        del r["_equity"], r["_initial"]
     out = {"name": (cfg.get("league") or {}).get("name") or "모의 거래소", "updated": now().isoformat(timespec="seconds"),
-           "initial": cfg["initial_cash"], "players": rows}
+           "initial": cfg["initial_cash"], "periods": [{"key": k, "label": l} for k, l, _ in PERIODS] + [{"key": "ytd", "label": "올해"}, {"key": "all", "label": "처음부터"}],
+           "players": rows, "contests": contests}
     LEAGUE_OUT.parent.mkdir(parents=True, exist_ok=True)
     LEAGUE_OUT.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
     return out
@@ -867,6 +963,7 @@ def build():
             "n_orders": len(orders), "n_filled": sum(o["status"] == "filled" for o in orders),
             "n_pending": sum(o["status"] in OPEN for o in orders),
         },
+        "performance": performance(equity, st["initial"]),
         "positions": positions, "equity": equity,
         "orders": sorted(orders, key=lambda o: o["id"], reverse=True),
         "order_pnl": order_pnl,
@@ -1106,7 +1203,7 @@ def cmd_issue(a):
     acct = next((x for x in accounts() if x["github"] and x["github"].lower() == author.lower()), None)
     lines = []
     if not acct:
-        lines.append(f"`{author}` 계정은 참가자 명단에 없어 주문을 받지 않았습니다. 대회 주인에게 초대를 요청해 주세요.")
+        lines.append(f"`{author}` 계정은 참가자 명단에 없어 주문을 받지 않았습니다. 거래소 주인에게 초대를 요청해 주세요.")
     else:
         open_missing()
         use(acct)
