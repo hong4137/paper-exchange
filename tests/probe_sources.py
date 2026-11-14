@@ -49,7 +49,7 @@ def events(label_fn):
     ev = label_fn()
     dv, sp = ev["dividends"], ev["splits"]
     last = max(dv) if dv else None
-    return (f"배당 {len(dv)}건" + (f" (마지막 {last} 주당 {dv[last]})" if last else "")
+    return (f"종류 {ev.get('type')}, 배당 {len(dv)}건" + (f" (마지막 {last} 주당 {dv[last]})" if last else "")
             + f", 분할 {len(sp)}건" + (f" {sorted(sp.items())[-1]}" if sp else ""))
 
 
@@ -78,5 +78,6 @@ probe("한국 ETF 분배금 (069500)", lambda: events(lambda: px.fetch_kr_events
 print("한국 종목이 ETF 인지 (매도 거래세가 다르다)")
 probe("주식 (005930)", lambda: kind("005930"))
 probe("ETF (069500)", lambda: kind("069500"))
+probe("상표 목록에 없는 이름의 ETF (360750)", lambda: kind("360750"))
 print("\n전부 열림" if not fails else f"\n막힌 곳 {fails}군데")
 sys.exit(1 if fails else 0)

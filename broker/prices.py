@@ -4,7 +4,7 @@
 - 한국 종목: 다음 금융 일별 (KRX 정규장 종가 — 포털 '현재가'는 애프터마켓 가격이라 쓰지 않는다)
 - 배당·액면분할: 야후 chart API 의 events (미국은 종목 기호 그대로, 한국은 {코드}.KS → 안 되면 .KQ).
   캐시의 "events": {"dividends": {배당락일: 주당 금액}, "splits": {분할일: [분자, 분모]}} 에 쌓는다 (지우지 않는다).
-- 한국 종목이 ETF 인지("kind"): 네이버 종목 기본 정보 → 안 되면 이름의 운용사 상표로 어림. 매도 거래세가 ETF 는 없다.
+- 한국 종목이 ETF 인지("kind"): 야후 chart 응답의 종목 종류(instrumentType) → 없으면 이름의 운용사 상표로 어림. 매도 거래세가 ETF 는 없다.
 캐시: {HOME}/data/prices/{키}.json  — 끝난 거래일의 봉만 넣는다.
 """
 import json
@@ -53,10 +53,10 @@ def _events(r, off):
 
 
 def fetch_yahoo_events(ticker: str, rng="2y"):
-    """배당·분할 사건만 받는다 (한국 종목용 — 시세는 다른 곳에서 받는다)."""
+    """배당·분할 사건만 받는다 (한국 종목용 — 시세는 다른 곳에서 받는다). 종목 종류는 "type" 에 실어 준다."""
     j = _get(f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range={rng}&interval=1d&events=div%7Csplit")
     r = j["chart"]["result"][0]
-    return _events(r, r["meta"].get("gmtoffset", 0))
+    return {**_events(r, r["meta"].get("gmtoffset", 0)), "type": r["meta"].get("instrumentType")}
 
 
 def fetch_kr_events(code: str):
@@ -74,14 +74,14 @@ ETF_BRANDS = ("KODEX", "TIGER", "RISE", "KBSTAR", "ACE", "KINDEX", "PLUS", "ARIR
               "마이티", "파워", "에셋플러스", "히어로즈", "마이다스", "더제이", "WOORI", "DAISHIN343")
 
 
-def fetch_kr_kind(code: str, name: str):
-    """한국 종목이 ETF 인지. 반환 (kind, 근거). 네이버 기본 정보가 안 열리면 이름의 운용사 상표로 어림한다."""
-    try:
-        t = str(_get(f"https://api.stock.naver.com/stock/{code}/basic").get("stockEndType") or "").lower()
-        if t:
-            return ("etf" if t in ("etf", "etn") else "stock"), "네이버 종목 정보"
-    except Exception:
-        pass
+KIND_SRC = "야후 종목 종류"
+
+
+def kr_kind(name: str, yahoo_type=None):
+    """한국 종목이 ETF 인지. 반환 (kind, 근거). 야후가 알려 준 종목 종류가 없으면 이름의 운용사 상표로 어림한다."""
+    t = str(yahoo_type or "").upper()
+    if t:
+        return ("etf" if t in ("ETF", "ETN", "MUTUALFUND") else "stock"), KIND_SRC
     return ("etf" if str(name).upper().startswith(tuple(b.upper() for b in ETF_BRANDS)) else "stock"), "이름으로 어림"
 
 
@@ -154,8 +154,8 @@ def update(home: Path, key: str, now: datetime):
             ev_note = "야후"
         except Exception as e:                           # 사건을 못 받아도 시세 갱신은 계속한다
             ev_note = f"받지 못함 ({type(e).__name__})"
-        if kind_src != "네이버 종목 정보":
-            kind, kind_src = fetch_kr_kind(key, name)
+        if kind_src != KIND_SRC or (new_ev or {}).get("type"):
+            kind, kind_src = kr_kind(name, (new_ev or {}).get("type"))
     else:
         market, ccy = "US", "USD"
         bars, name, new_ev = fetch_yahoo(key, "US", now)
