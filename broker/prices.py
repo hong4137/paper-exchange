@@ -2,6 +2,9 @@
 
 - 미국 종목·환율: 야후 chart API (일봉)
 - 한국 종목: 다음 금융 일별 (KRX 정규장 종가 — 포털 '현재가'는 애프터마켓 가격이라 쓰지 않는다)
+- 배당·액면분할: 야후 chart API 의 events (미국은 종목 기호 그대로, 한국은 {코드}.KS → 안 되면 .KQ).
+  캐시의 "events": {"dividends": {배당락일: 주당 금액}, "splits": {분할일: [분자, 분모]}} 에 쌓는다 (지우지 않는다).
+- 한국 종목이 ETF 인지("kind"): 야후 chart 응답의 종목 종류(instrumentType) → 없으면 이름의 운용사 상표로 어림. 매도 거래세가 ETF 는 없다.
 캐시: {HOME}/data/prices/{키}.json  — 끝난 거래일의 봉만 넣는다.
 """
 import json
@@ -35,8 +38,68 @@ def _complete(bar_date: str, market: str, now: datetime) -> bool:
     return now.date() > d.date()                          # 환율: 지난 날짜만
 
 
+def _events(r, off):
+    """야후 chart 응답의 배당·분할 사건을 {"dividends": {날짜: 금액}, "splits": {날짜: [분자, 분모]}} 로."""
+    ev = r.get("events") or {}
+    day = lambda ts: datetime.fromtimestamp(int(ts) + off, timezone.utc).strftime("%Y-%m-%d")
+    out = {"dividends": {}, "splits": {}}
+    for x in (ev.get("dividends") or {}).values():
+        if x.get("amount"):
+            out["dividends"][day(x["date"])] = x["amount"]
+    for x in (ev.get("splits") or {}).values():
+        if x.get("numerator") and x.get("denominator") and x["numerator"] != x["denominator"]:
+            out["splits"][day(x["date"])] = [x["numerator"], x["denominator"]]
+    return out
+
+
+def fetch_yahoo_events(ticker: str, rng="2y"):
+    """배당·분할 사건만 받는다 (한국 종목용 — 시세는 다른 곳에서 받는다). 종목 종류는 "type" 에 실어 준다."""
+    j = _get(f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range={rng}&interval=1d&events=div%7Csplit")
+    r = j["chart"]["result"][0]
+    closes = [c for c in r["indicators"]["quote"][0].get("close") or [] if c]
+    return {**_events(r, r["meta"].get("gmtoffset", 0)), "type": r["meta"].get("instrumentType"),
+            "close": closes[-1] if closes else r["meta"].get("regularMarketPrice")}
+
+
+def fetch_kr_events(code: str, ref_close=None):
+    """한국 종목의 배당·분할. 야후에서는 코스피가 {코드}.KS, 코스닥이 {코드}.KQ 다.
+    같은 번호로 전혀 다른 상품(펀드 등)이 답하는 일이 있어(2026-11-14 확인: 247540.KS), 종류가 주식·ETF 이고
+    최근 종가가 우리 시세(ref_close)와 10% 안에서 맞는 쪽만 받는다. 맞는 것이 없으면 받지 않는다."""
+    last = None
+    for suffix in (".KS", ".KQ"):
+        try:
+            ev = fetch_yahoo_events(code + suffix)
+        except Exception as e:
+            last = e
+            continue
+        if str(ev.get("type") or "").upper() not in ("EQUITY", "ETF"):
+            last = ValueError(f"{code}{suffix} 는 주식·ETF 가 아님 ({ev.get('type')})")
+            continue
+        if ref_close and ev.get("close") and abs(ev["close"] / ref_close - 1) > 0.1:
+            last = ValueError(f"{code}{suffix} 값이 우리 시세와 다름 ({ev['close']} vs {ref_close})")
+            continue
+        return {**ev, "ticker": code + suffix}
+    raise last or ValueError("자료 없음")
+
+
+ETF_BRANDS = ("KODEX", "TIGER", "RISE", "KBSTAR", "ACE", "KINDEX", "PLUS", "ARIRANG", "SOL", "HANARO", "KOSEF", "KIWOOM",
+              "TIMEFOLIO", "TIME", "WON", "1Q", "BNK", "FOCUS", "HK", "TRUSTON", "VITA", "KoAct", "TREX", "UNICORN", "ITF",
+              "마이티", "파워", "에셋플러스", "히어로즈", "마이다스", "더제이", "WOORI", "DAISHIN343")
+
+
+KIND_SRC = "야후 종목 종류"
+
+
+def kr_kind(name: str, yahoo_type=None):
+    """한국 종목이 ETF 인지. 반환 (kind, 근거). 야후가 알려 준 종목 종류가 없으면 이름의 운용사 상표로 어림한다."""
+    t = str(yahoo_type or "").upper()
+    if t:
+        return ("etf" if t == "ETF" else "stock"), KIND_SRC
+    return ("etf" if str(name).upper().startswith(tuple(b.upper() for b in ETF_BRANDS)) else "stock"), "이름으로 어림"
+
+
 def fetch_yahoo(ticker: str, market: str, now: datetime, rng="6mo"):
-    j = _get(f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range={rng}&interval=1d")
+    j = _get(f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range={rng}&interval=1d&events=div%7Csplit")
     r = j["chart"]["result"][0]
     off = r["meta"].get("gmtoffset", 0)
     q = r["indicators"]["quote"][0]
@@ -51,7 +114,7 @@ def fetch_yahoo(ticker: str, market: str, now: datetime, rng="6mo"):
         o, h, l = q["open"][i] or c, q["high"][i] or c, q["low"][i] or c
         bars.append({"d": d, "o": round(o, 4), "h": round(h, 4), "l": round(l, 4), "c": round(c, 4)})
     name = r["meta"].get("longName") or r["meta"].get("shortName") or ticker
-    return bars, name
+    return bars, name, _events(r, off)
 
 
 def fetch_daum(code: str, now: datetime, per=250):
@@ -86,18 +149,38 @@ def load(home: Path, key: str):
 
 
 def update(home: Path, key: str, now: datetime):
-    """key = 종목 기호 또는 FX_KEY. 새 봉을 캐시에 합친다."""
+    """key = 종목 기호 또는 FX_KEY. 새 봉을 캐시에 합친다. 종목이면 배당·분할 사건도 쌓는다."""
+    old = load(home, key) or {"bars": []}
+    events = {"dividends": dict((old.get("events") or {}).get("dividends") or {}),
+              "splits": dict((old.get("events") or {}).get("splits") or {})}
+    kind, kind_src, ev_note = old.get("kind"), old.get("kind_src"), old.get("events_note")
+    new_ev = None
     if key == FX_KEY:
         market, ccy = "FX", "KRW"
-        bars, name = fetch_yahoo("KRW=X", "FX", now)
+        bars, name, _ = fetch_yahoo("KRW=X", "FX", now)
         name = "달러/원 환율"
     elif market_of(key) == "KR":
         market, ccy = "KR", "KRW"
         bars, name = fetch_daum(key, now)
+        try:
+            new_ev = fetch_kr_events(key, bars[-1]["c"] if bars else None)
+            ev_note = f"야후 {new_ev['ticker']}"
+        except Exception as e:                           # 사건을 못 받아도 시세 갱신은 계속한다
+            ev_note = f"받지 못함 ({str(e)[:60] or type(e).__name__})"
+        if kind_src != KIND_SRC or (new_ev or {}).get("type"):
+            kind, kind_src = kr_kind(name, (new_ev or {}).get("type"))
     else:
         market, ccy = "US", "USD"
-        bars, name = fetch_yahoo(key, "US", now)
-    old = load(home, key) or {"bars": []}
+        bars, name, new_ev = fetch_yahoo(key, "US", now)
+        ev_note = "야후"
+        if set(new_ev["splits"]) - set(events["splits"]):   # 새 분할: 야후는 지난 값을 전부 고쳐 주므로 오래된 봉까지 다시 받는다
+            try:
+                bars = fetch_yahoo(key, "US", now, rng="10y")[0]
+            except Exception:
+                pass
+    if new_ev:
+        events["dividends"].update(new_ev["dividends"])
+        events["splits"].update(new_ev["splits"])
     merged = {b["d"]: b for b in old["bars"]}
     for b in bars:
         merged[b["d"]] = b
@@ -105,6 +188,10 @@ def update(home: Path, key: str, now: datetime):
            "updated": now.isoformat(timespec="seconds"),
            "source": "다음 금융 일별" if market == "KR" else "야후 일봉",
            "bars": [merged[d] for d in sorted(merged)]}
+    if market != "FX":
+        out["events"], out["events_note"] = events, ev_note
+    if kind:
+        out["kind"], out["kind_src"] = kind, kind_src
     p = cache_path(home, key)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")

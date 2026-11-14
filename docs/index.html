@@ -130,6 +130,17 @@ tr:last-child td{border-bottom:0}
 .feed li.decision::before{border-color:var(--gold)}
 .feed li.report::before{border-color:var(--ok); background:var(--ok)}
 .feed li.reject::before,.feed li.expire::before,.feed li.cancel::before{border-color:var(--down)}
+.feed li.fx::before,.feed li.split::before{border-color:var(--gold)}
+.feed li.dividend::before{border-color:var(--ok); background:var(--ok)}
+/* 돈의 흐름 */
+.money{display:grid; grid-template-columns:repeat(3,1fr); gap:10px}
+.mcard{background:var(--ink2); border:1px solid var(--line); border-radius:14px; padding:14px 16px}
+.mcard h3{margin:0 0 8px; font-size:14px; font-weight:700}
+.mcard dl{display:grid; grid-template-columns:1fr auto; gap:5px 12px; margin:0; font-size:13.5px}
+.mcard dt{color:var(--dim)} .mcard dd{margin:0; text-align:right}
+.mcard .sum{border-top:1px solid var(--line); padding-top:6px; margin-top:2px; color:var(--txt); font-weight:700}
+.mcard .note{margin:8px 0 0; font-size:12px; color:var(--dim)}
+.tblwrap{overflow-x:auto; margin-top:10px}
 .feed time{display:block; font-size:12px; color:var(--dim)}
 .more{font:inherit; margin-top:4px; background:transparent; color:var(--dim); border:1px solid var(--line); border-radius:99px; padding:6px 14px; cursor:pointer}
 
@@ -139,7 +150,7 @@ footer{margin:40px 0 50px; padding-top:16px; border-top:1px solid var(--line); c
 
 @media (max-width:720px){
   body{background-image:linear-gradient(var(--rule) 1px, transparent 1px); background-size:100% 32px}
-  .kpis{grid-template-columns:repeat(2,1fr)}
+  .kpis{grid-template-columns:repeat(2,1fr)} .money{grid-template-columns:1fr}
   .prow{grid-template-columns:1fr 1fr} .prow .c3{display:none}
   .hero .in{padding:20px 16px 150px} .legend{left:16px} .axis{display:none}
   th,td{padding:9px 10px; font-size:13px}
@@ -192,9 +203,36 @@ function curve(eq){
 }
 
 const HHMM=s=>s?s.slice(5,16).replace('T',' '):'';
+const usd=n=>(n==null?'—':Number(n).toLocaleString('ko-KR',{minimumFractionDigits:2,maximumFractionDigits:2}));
+const rate=r=>(r*100).toLocaleString('ko-KR',{maximumFractionDigits:5})+'%';
+function fxSlip(o){
+  const r=o.result||{}, buy=o.side==='buy';
+  const amt=buy?(o.krw?won(o.krw)+'원을 달러로':usd(o.usd)+'달러 사기'):(o.usd==='all'||o.usd==null?'달러 전부를 원화로':usd(o.usd)+'달러를 원화로');
+  let rows=`<dt>주문량</dt><dd class="num">${amt}</dd>`;
+  if(o.status==='filled'){
+    rows+=`<dt>바꾼 시각</dt><dd class="num">${HHMM(r.at)||r.date}</dd>
+      <dt>${buy?'낸 원화':'받은 원화'}</dt><dd class="num">${won(r.krw)}원</dd>
+      <dt>${buy?'받은 달러':'낸 달러'}</dt><dd class="num">${usd(r.usd)}달러</dd>
+      <dt>기준 환율</dt><dd class="num">${r.mid.toLocaleString()}원</dd>
+      <dt>적용 환율</dt><dd class="num">${r.rate.toLocaleString()}원</dd>
+      <dt>환전 비용</dt><dd class="num">${won(r.cost_krw)}원</dd>
+      <dt>바꾼 뒤 예수금</dt><dd class="num">${won(r.krw_after)}원 · ${usd(r.usd_after)}달러</dd>
+      <dt>쓴 환율 시세</dt><dd>${r.precision||'하루'} 단위</dd>`;
+  }
+  if(o.status==='pending') rows+=`<dt>유효기간</dt><dd class="num">${o.valid_until}까지</dd>`;
+  if(r.why) rows+=`<dt>사유</dt><dd>${esc(r.why)}</dd>`;
+  return `<article class="slip">
+    <div class="stamp ${o.status}">${STATUS[o.status]}</div>
+    <div class="hd"><span class="num">${o.id}${o.ref?' · 꼬리표 '+esc(o.ref):''}</span><span>${when(o.ts)}</span></div>
+    <div class="ttl"><span class="side ${o.side}">${buy?'달러 사기':'달러 팔기'}</span> 환전</div>
+    <div class="hd"><span>원화 ↔ 달러</span></div>
+    <dl>${rows}</dl>
+  </article>`;
+}
 const SES={pre:'장전',post:'장후'};
 function slip(o){
-  const r=o.result||{}, buy=o.side==='buy', cur=o.market==='US'?' 달러':' 원';
+  if(o.market==='FX') return fxSlip(o);
+  const r=o.result||{}, buy=o.side==='buy', US=o.market==='US', cur=US?' 달러':' 원';
   const how={market:'시장가',moc:'그날 종가'}[o.type]||((o.type==='limit'?'지정가 ':'손절가 ')+o.price.toLocaleString());
   const amt=o.krw?won(o.krw)+'원어치':(o.qty==='all'||o.qty==null?'전량':o.qty+'주');
   let rows=`<dt>방식</dt><dd>${how}${o.session==='all'?' · 시간외 포함':''}</dd><dt>주문량</dt><dd class="num">${amt}</dd>`;
@@ -203,9 +241,16 @@ function slip(o){
     rows+=`<dt>체결 시각</dt><dd class="num">${span}${SES[r.session]?' <b>'+SES[r.session]+'</b>':''}</dd>
       <dt>체결가${r.pieces>1?' (평균)':''}</dt><dd class="num">${r.price.toLocaleString()}${cur}</dd>
       <dt>수량</dt><dd class="num">${r.qty}주${o.status==='partial'||r.qty<r.total?` / ${r.total}주`:''}</dd>
-      <dt>금액</dt><dd class="num">${won(r.gross_krw)}원</dd><dt>비용</dt><dd class="num">${won(r.fee_krw)}원</dd>`;
-    if(o.market==='US') rows+=`<dt>환율</dt><dd class="num">${r.fx.toLocaleString()}원</dd>`;
-    rows+=`<dt>체결 뒤 현금</dt><dd class="num">${won(r.cash_after)}원</dd>
+      <dt>금액</dt><dd class="num">${US&&r.gross!=null?usd(r.gross)+'달러 · ':''}${won(r.gross_krw)}원</dd>`;
+    if(r.fees){ const m=v=>US?usd(v)+'달러':won(v)+'원';
+      rows+=`<dt>수수료</dt><dd class="num">${m(r.fees.commission)}</dd>`;
+      if(r.fees.tax) rows+=`<dt>${US?'매도 제비용':'거래세'}</dt><dd class="num">${m(r.fees.tax)}</dd>`;
+      rows+=`<dt>비용 합계</dt><dd class="num">${won(r.fee_krw)}원</dd>`;
+    } else rows+=`<dt>비용</dt><dd class="num">${won(r.fee_krw)}원</dd>`;
+    if(US) rows+=`<dt>환율</dt><dd class="num">${r.fx.toLocaleString()}원</dd>`;
+    const auto=(S.feed||[]).filter(f=>f.type==='fx'&&f.text.includes('('+o.id+' 매수')).length;
+    if(auto) rows+=`<dt>자동 환전</dt><dd>모자란 달러를 ${auto}번 바꿈</dd>`;
+    rows+=`<dt>체결 뒤 예수금</dt><dd class="num">${won(r.cash_after)}원${r.usd_after!=null&&(US||r.usd_after)?' · '+usd(r.usd_after)+'달러':''}</dd>
       <dt>체결에 쓴 시세</dt><dd>${r.precision||'하루'} 단위${r.pieces>1?` · ${r.pieces}번에 나눠`:''}</dd>`;
   }
   if(o.status==='pending'||o.status==='partial') rows+=`<dt>유효기간</dt><dd class="num">${o.valid_until}까지</dd>`;
@@ -214,7 +259,7 @@ function slip(o){
     <div class="stamp ${o.status}">${STATUS[o.status]}</div>
     <div class="hd"><span class="num">${o.id}${o.ref?' · 꼬리표 '+esc(o.ref):''}</span><span>${when(o.ts)}</span></div>
     <div class="ttl"><span class="side ${o.side}">${buy?'사기':'팔기'}</span> ${esc(o.name)}</div>
-    <div class="hd"><span class="num">${o.symbol} · ${o.market==='US'?'미국':'한국'}</span></div>
+    <div class="hd"><span class="num">${o.symbol} · ${US?'미국 · 달러로 거래':'한국'}</span></div>
     <dl>${rows}</dl>
   </article>`;
 }
@@ -232,6 +277,8 @@ function render(){
   const orders=S.orders.filter(o=>filter==='all'||grp(o)===filter);
   const cnt=k=>S.orders.filter(o=>grp(o)===k).length;
   const feed=feedAll?S.feed:S.feed.slice(0,12);
+  const c=s.costs||{commission_krw:s.fees_krw||0,tax_krw:0,fx_krw:0}, dv=s.dividends||{count:0,gross_krw:0,tax_krw:0,net_krw:0};
+  const krwCash=s.cash_krw??s.cash, usdCash=s.cash_usd||0, F=S.fees||null, g=s.us_gains, divs=S.dividends||[];
 
   $('#app').innerHTML=`
   <div class="hero">${curve(eq)}
@@ -249,10 +296,10 @@ function render(){
   </div>
 
   <div class="kpis">
-    <div class="kpi"><div class="k">현금</div><div class="v num">${won(s.cash)}원</div><div class="bar"><i style="width:${s.cash_pct}%"></i></div><div class="s num">전체의 ${s.cash_pct}%</div></div>
+    <div class="kpi"><div class="k">예수금 (원화 + 달러)</div><div class="v num">${won(s.cash)}원</div><div class="bar"><i style="width:${s.cash_pct}%"></i></div><div class="s num">전체의 ${s.cash_pct}% · 달러 ${usd(usdCash)}</div></div>
     <div class="kpi"><div class="k">주식·ETF</div><div class="v num">${won(s.invested)}원</div><div class="s">${S.positions.length}종목 보유</div></div>
     <div class="kpi"><div class="k">주문</div><div class="v num">${s.n_orders}건</div><div class="s">체결 ${s.n_filled} · 대기 ${s.n_pending}</div></div>
-    <div class="kpi"><div class="k">지금까지 낸 비용</div><div class="v num">${won(s.fees_krw)}원</div><div class="s">매매마다 ${(S.fee_rate*100).toFixed(1)}%</div></div>
+    <div class="kpi"><div class="k">지금까지 낸 비용</div><div class="v num">${won(s.fees_krw)}원</div><div class="s num">받은 배당 ${won(dv.net_krw)}원</div></div>
   </div>
 
   <section><h2>보유 종목</h2><p class="sub">지금 들고 있는 것과 산 값 대비 손익입니다.</p>
@@ -264,6 +311,31 @@ function render(){
           ${p.ext?`<div class="sm num ext ${cls(p.ext.chg_pct)}">${SES[p.ext.session]} ${p.ext.price.toLocaleString()} (${pct(p.ext.chg_pct)}) · ${p.ext.at.slice(5,16).replace('T',' ')}</div>`:''}</div>
         <div class="r"><div class="sm">손익</div><div class="num ${cls(p.pnl_krw)}">${sign(p.pnl_krw)}원</div><div class="sm num ${cls(p.pnl_krw)}">${pct(p.pnl_pct)}</div></div>
       </div>`).join('')}</div>`:`<div class="empty">아직 산 것이 없습니다. 전액 현금입니다.</div>`}
+  </section>
+
+  <section><h2>돈의 흐름</h2><p class="sub">예수금은 원화와 달러 두 주머니입니다. 한국 주식은 원화로, 미국 주식은 달러로 사고팝니다.</p>
+    <div class="money">
+      <div class="mcard"><h3>예수금</h3><dl>
+        <dt>원화</dt><dd class="num">${won(krwCash)}원</dd>
+        <dt>달러</dt><dd class="num">${usd(usdCash)}달러</dd>
+        <dt>달러의 원화 값어치</dt><dd class="num">${won(s.cash_usd_krw||0)}원</dd>
+        <dt class="sum">합계</dt><dd class="num sum">${won(s.cash)}원</dd></dl>
+        <p class="note">${S.fx?`달러는 1달러 = <span class="num">${S.fx.toLocaleString()}</span>원(가장 최근 하루 환율)으로 셉니다.`:'환율 자료가 아직 없습니다.'}</p></div>
+      <div class="mcard"><h3>낸 비용</h3><dl>
+        <dt>수수료</dt><dd class="num">${won(c.commission_krw)}원</dd>
+        <dt>세금·제비용</dt><dd class="num">${won(c.tax_krw)}원</dd>
+        <dt>환전 비용</dt><dd class="num">${won(c.fx_krw)}원</dd>
+        <dt class="sum">합계</dt><dd class="num sum">${won(s.fees_krw)}원</dd></dl>
+        <p class="note">세금·제비용은 한국 주식을 팔 때의 거래세와 미국 주식을 팔 때 미국 쪽에 내는 비용입니다.${g?` 올해(${g.year}) 미국 주식을 팔아 확정된 손익은 <span class="num ${cls(g.realized_krw)}">${sign(g.realized_krw)}원</span>, 이대로면 내년에 낼 양도소득세는 약 <span class="num">${won(g.est_tax_krw)}원</span>입니다(떼지 않고 보여 주기만 합니다).`:''}</p></div>
+      <div class="mcard"><h3>받은 배당</h3><dl>
+        <dt>세금 떼기 전</dt><dd class="num">${won(dv.gross_krw)}원</dd>
+        <dt>뗀 세금</dt><dd class="num">${won(dv.tax_krw)}원</dd>
+        <dt class="sum">받은 돈</dt><dd class="num sum">${won(dv.net_krw)}원</dd></dl>
+        <p class="note">${dv.count?`${dv.count}번 받았습니다. 달러로 받은 배당은 받은 때 환율로 원화로 바꿔 셌습니다.`:'아직 받은 배당이 없습니다.'}</p></div>
+    </div>
+    ${divs.length?`<div class="tblwrap"><table><thead><tr><th>배당</th><th>배당락일</th><th>주식 수</th><th>주당</th><th>세금</th><th>받은 돈</th></tr></thead><tbody>
+      ${divs.map(d=>{const m=v=>d.ccy==='USD'?usd(v)+'달러':won(v)+'원';return `<tr><td>${esc(d.name)}</td><td class="num">${d.ex_date}</td><td class="num">${d.qty}주</td><td class="num">${d.ccy==='USD'?d.per_share+'달러':d.per_share.toLocaleString()+'원'}</td><td class="num">${m(d.tax)}</td><td class="num">${m(d.net)}</td></tr>`}).join('')}
+    </tbody></table></div>`:''}
   </section>
 
   <section><h2>주문 전표</h2><p class="sub">낸 주문 하나하나와 그 결과입니다. 도장이 결과입니다. 왜 그렇게 주문했는지는 운용 일지에 있습니다.</p>
@@ -282,7 +354,8 @@ function render(){
   <section><h2>이 계좌의 규칙</h2><ol class="rules">${S.rules.map(r=>`<li>${esc(r)}</li>`).join('')}</ol></section>`;
 
   const asof=Object.entries(S.prices_asof).map(([k,v])=>`${k==='USDKRW'?'환율':k} ${v||'없음'}`).join(' · ');
-  $('#foot').innerHTML=`가격 기준일 — <span class="num">${asof}</span><br>체결은 1분 시세(미국·환율은 야후, 한국은 네이버)로, 평가는 하루 종가(미국·환율은 야후, 한국은 다음 금융)로 합니다. 5분마다 다시 불러옵니다.`;
+  $('#foot').innerHTML=`가격 기준일 — <span class="num">${asof}</span><br>체결은 1분 시세(미국·환율은 야후, 한국은 네이버)로, 평가는 하루 종가(미국·환율은 야후, 한국은 다음 금융)로 합니다. 배당과 액면분할은 야후 자료로 확인합니다. 5분마다 다시 불러옵니다.`
+    +(F&&F.KR&&F.US&&F.KR.sell_tax_rate!=null?`<br>적용 요율 — 한국 주식: 수수료 <span class="num">${rate(F.KR.commission_rate+(F.KR.exchange_fee_rate||0))}</span>, 팔 때 거래세 <span class="num">${rate(F.KR.sell_tax_rate)}</span>(ETF 없음) · 미국 주식: 수수료 <span class="num">${rate(F.US.commission_rate)}</span>, 팔 때 제비용 약 <span class="num">${rate(F.US.sec_fee_rate||0)}</span> · 환전 <span class="num">${rate(F.fx_spread_rate||0)}</span> · 배당 세금 한국 <span class="num">${rate(F.dividend_tax.KR)}</span>, 미국 <span class="num">${rate(F.dividend_tax.US)}</span>. 수수료와 환전 비용은 증권사마다 달라 가정한 값입니다.`:'');
   document.querySelectorAll('.chip').forEach(b=>b.onclick=()=>{filter=b.dataset.f;render()});
   const m=$('#more'); if(m) m.onclick=()=>{feedAll=true;render()};
 }

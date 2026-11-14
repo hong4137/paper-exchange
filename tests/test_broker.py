@@ -3,6 +3,7 @@
 실행: python tests/test_broker.py
 """
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -15,6 +16,16 @@ BROKER = ROOT / "broker" / "broker.py"
 tmp = Path(tempfile.mkdtemp(prefix="paper_test_"))
 shutil.copy(ROOT / "config.json", tmp / "config.json")
 (tmp / "data" / "prices").mkdir(parents=True)
+
+# 시험용 요율 — 실제 config.json 의 값이 바뀌어도 이 시험의 기대값은 그대로다 (2026-11-14 에 정한 값과 같다)
+FEES = {"KR": {"commission_rate": 0.00015, "exchange_fee_rate": 0.000036396, "sell_tax_rate": 0.002},
+        "US": {"commission_rate": 0.0025, "sec_fee_rate": 0.0000206, "sec_fee_from": "2026-04-04",
+               "taf_per_share": 0.000195, "taf_max": 9.79},
+        "fx_spread_rate": 0.002, "dividend_tax": {"KR": 0.154, "US": 0.15},
+        "us_gains_tax": {"rate": 0.22, "deduction_krw": 2500000}}
+_cfg = json.loads((tmp / "config.json").read_text(encoding="utf-8"))
+_cfg.update({"fees": FEES, "usd_shortfall": "auto"})
+(tmp / "config.json").write_text(json.dumps(_cfg, ensure_ascii=False), encoding="utf-8")
 
 
 def bars(rows):
@@ -74,14 +85,21 @@ run("2026-11-07T09:00:00+09:00", "settle")
 st = json.loads(run("2026-11-07T09:00:00+09:00", "build") and (tmp / "docs" / "data" / "state.json").read_text(encoding="utf-8"))
 o = {x["id"]: x for x in st["orders"]}
 
-# O0001: 월요일 10시(한국) 주문 → 미국 11-02 종가 102, 환율 1310. 주당 133,620원, 비용 0.1%
+# O0001: 월요일 10시(한국) 주문 → 미국 11-02 종가 102, 환율 1310. 달러로 산다: 74주 7,548달러 + 수수료 0.25% 18.87달러.
+# 달러 예수금이 없으므로 7,566.87달러를 자동 환전(기준 환율보다 0.2% 비싸게)한다.
 r = o["O0001"]["result"]
 check("미국 시장가: 주문 뒤 처음 열리는 날 종가", o["O0001"]["status"] == "filled" and r["date"] == "2026-11-02" and r["price"] == 102, str(r))
-check("금액 주문: 비용 포함해 살 수 있는 최대 주 수", r["qty"] == 74, str(r["qty"]))          # 10,000,000 / (133,620*1.001) = 74.7
-check("원화 계산과 비용", r["gross_krw"] == 74 * 133620 and r["fee_krw"] == round(74 * 133620 * 0.001), str(r))
+check("금액 주문: 비용 포함해 살 수 있는 최대 주 수", r["qty"] == 74, str(r["qty"]))          # 10,000,000 / (133,620*1.002*1.0025) = 74.5
+check("미국 주식은 달러로 계산하고 수수료 0.25%", r["ccy"] == "USD" and r["gross"] == 7548 and r["fees"] == {"commission": 18.87, "tax": 0}
+      and r["delta"] == -7566.87 and r["gross_krw"] == 74 * 133620 and r["fee_krw"] == round(18.87 * 1310), str(r))
+fx_krw = math.ceil(7566.87 * 1310 * 1.002)
+auto = [f for f in st["feed"] if f["type"] == "fx"]
+check("달러가 모자라면 모자란 만큼만 자동 환전하고 장부에 따로 남는다", len(auto) == 1 and "자동 환전" in auto[0]["text"]
+      and f"{fx_krw:,}원" in auto[0]["text"] and "7,566.87달러" in auto[0]["text"], str(auto))
 # O0002: 한국 10시 주문 → 그날 장은 이미 열렸으니 11-03 종가 51,000
 r = o["O0002"]["result"]
 check("한국 시장가: 개장 뒤 주문은 다음 거래일 종가", r["date"] == "2026-11-03" and r["price"] == 51000, str(r))
+check("한국 주식 살 때: 수수료 0.015% + 거래소·예탁원 비용, 세금 없음", r["fees"] == {"commission": 95, "tax": 0} and r["delta"] == -510095, str(r))
 # O0003: 손절 95 — 산 날(11-02)은 건너뛰고 11-04 저가 88에 닿음, 시가 96 > 95 이므로 95 에 체결
 r = o["O0003"]["result"]
 check("손절: 닿은 날 손절가(시가가 더 낮으면 시가)에 전량", o["O0003"]["status"] == "filled" and r["date"] == "2026-11-04"
@@ -89,16 +107,21 @@ check("손절: 닿은 날 손절가(시가가 더 낮으면 시가)에 전량", 
 check("지정가: 닿지 않으면 만료", o["O0004"]["status"] == "expired", o["O0004"]["status"])
 check("접수 뒤 다른 체결로 현금이 줄면 체결 단계에서 거부", o["O0005"]["status"] == "rejected" and "현금 부족" in o["O0005"]["result"]["why"], str(o["O0005"]["result"]))
 
-buy = 74 * 133620
-sell = 74 * 95 * 1320
-cash = 50000000 - (buy + round(buy * 0.001)) - (510000 + 510) + (sell - round(sell * 0.001))
-check("현금 잔액", st["summary"]["cash"] == cash, f"{st['summary']['cash']} vs {cash}")
+# 판 돈은 달러로 남는다: 7,030 - 수수료 17.58 - 매도 제비용(SEC 0.15 + FINRA 0.02) = 7,012.25달러
+check("미국 주식 팔 때: 수수료와 매도 제비용을 달러로 뗀다", r["fees"] == {"commission": 17.58, "tax": 0.17} and r["delta"] == 7012.25, str(r))
+s = st["summary"]
+krw = 50000000 - fx_krw - 510095
+check("원화·달러 예수금이 따로 선다", s["cash_krw"] == krw and s["cash_usd"] == 7012.25 and s["cash_usd_krw"] == round(7012.25 * 1320), str(s))
+cash = round(krw + 7012.25 * 1320)                        # 달러는 마지막 환율(1320)로 원화 환산
+check("현금 잔액 (원화 + 달러의 원화 값어치)", s["cash"] == cash, f"{s['cash']} vs {cash}")
+check("낸 비용이 수수료·세금·환전으로 나뉜다", s["costs"] == {"commission_krw": round(18.87 * 1310 + 95 + 17.58 * 1320),
+      "tax_krw": round(0.17 * 1320), "fx_krw": round(7566.87 * 1310 * 0.002)} and s["fees_krw"] == sum(s["costs"].values()), str(s["costs"]))
 check("보유는 한국 종목 10주뿐", len(st["positions"]) == 1 and st["positions"][0]["qty"] == 10, str(st["positions"]))
 check("총자산 = 현금 + 평가액", st["summary"]["total"] == cash + 10 * 50900, str(st["summary"]["total"]))
 bench = round(50000000 * (0.5 * (606 * 1320) / (600 * 1310) + 0.5 * 80800 / 80000))   # 기준일(개설일 11-02) 환율 1310
 check("비교 기준 계산", st["equity"][-1]["bench"] == bench, f"{st['equity'][-1]['bench']} vs {bench}")
-real = (sell - round(sell * 0.001)) - (buy + round(buy * 0.001))
-unreal = 10 * 50900 - (510000 + 510)
+real = round(7012.25 * 1320 - 7566.87 * 1310)            # 판 돈과 산 값을 각각 그때 환율로 원화 환산
+unreal = 10 * 50900 - 510095
 op = st["order_pnl"]
 check("산 주문별 손익: 다 판 주문은 실현 손익, 들고 있는 주문은 미실현 손익",
       op["O0001"]["realized_krw"] == real and op["O0001"]["unrealized_krw"] == 0 and op["O0002"]["unrealized_krw"] == unreal, str(op))

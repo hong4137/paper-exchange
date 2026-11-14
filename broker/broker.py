@@ -3,6 +3,12 @@
 거래소는 "왜 샀는지"를 모른다. 결정 기록·보고서·교훈은 운용 일지(통합 개발/모의투자-일지)의 일이다.
 주문에는 운용자가 붙인 꼬리표(--ref)만 실려 오고, 거래소는 그 내용을 읽지 않는다.
 
+돈은 원화·달러 두 주머니다. 한국 주식은 원화로, 미국 주식은 달러로 사고판다 (판 돈도 달러로 남는다).
+  달러가 모자란 미국 주식 매수는 모자란 만큼만 자동으로 환전한다 (config.json "usd_shortfall": "auto", 아니면 거부).
+  비용(수수료·세금·환전)은 config.json "fees", 배당·액면분할은 시세 캐시의 events 를 보고 settle 이 장부에 적는다.
+장부 줄 종류: open · order · cancel · fill · reject · expire · refuse · fx(환전) · dividend(배당) · split(분할·병합).
+  옛 fill 줄(ccy·delta 가 없는 것)은 원화 한 주머니 시절 것으로 읽는다.
+
 장부는 {HOME}/ledger/ledger.jsonl 한 파일이다. 줄 추가만 하고, 줄마다 앞줄의 지문(hash)을 품는다.
 상태(현금·보유·주문 상태)는 장부를 처음부터 다시 읽어 만든다.
 
@@ -12,6 +18,8 @@
   python broker/broker.py order --symbol MU --side buy --qty 10 --type moc               그날 종가에
   python broker/broker.py order --symbol MU --side buy --qty 3 --type limit --price 775 --session all   시간외 포함 지정가
   python broker/broker.py order --symbol MU --side sell --qty all --type stop --price 700
+  python broker/broker.py order --symbol USD --side buy --krw 3000000      환전: 원화 300만 원을 달러로 (--usd 2000 처럼 달러 금액도)
+  python broker/broker.py order --symbol USD --side sell --usd all         환전: 달러 예수금 전부를 원화로
   python broker/broker.py cancel --order O0001 --why ..
   python broker/broker.py daily                     시세 갱신 → 체결 → 화면 자료 만들기
   python broker/broker.py status | verify
@@ -86,10 +94,62 @@ def verify(events=None):
     return True, len(events)
 
 
+# ---------- 돈: 비용과 반올림 ----------
+# 원화는 1원, 달러는 1센트 단위. 요율은 config.json 의 "fees" (출처·기준일은 CLAUDE.md).
+def won_floor(x):
+    return math.floor(x + 1e-6)
+
+
+def cent(x):
+    return round(x + 1e-9, 2)
+
+
+def cent_up(x):
+    return math.ceil(x * 100 - 1e-6) / 100
+
+
+def fee_cfg(cfg):
+    """새 설정("fees")이 없으면 옛 방식(매매마다 fee_rate 한 가지)으로 읽는다."""
+    f = cfg.get("fees")
+    if f:
+        return f
+    r = cfg.get("fee_rate", 0)
+    return {"KR": {"commission_rate": r}, "US": {"commission_rate": r}}
+
+
+def buy_load(cfg, market):
+    """살 때 값에 얹히는 비율 (금액 주문에서 몇 주를 살 수 있는지 셀 때 쓴다)."""
+    f = fee_cfg(cfg).get(market, {})
+    return f.get("commission_rate", 0) + f.get("exchange_fee_rate", 0)
+
+
+def trade_costs(cfg, market, side, qty, gross, date, etf=False):
+    """매매 한 건의 비용. 그 시장의 돈(한국 원, 미국 달러)으로 {"commission": 수수료, "tax": 세금·제비용}."""
+    f = fee_cfg(cfg).get(market, {})
+    if market == "KR":
+        out = {"commission": won_floor(gross * (f.get("commission_rate", 0) + f.get("exchange_fee_rate", 0))), "tax": 0}
+        if side == "sell" and not etf:                  # 증권거래세(+농어촌특별세). ETF 는 없다
+            out["tax"] = won_floor(gross * f.get("sell_tax_rate", 0))
+        return out
+    out = {"commission": cent(gross * f.get("commission_rate", 0)), "tax": 0}
+    if side == "sell":                                  # 미국 매도 제비용: SEC 비용(금액 비례) + FINRA 비용(주 수 비례, 상한)
+        sec = cent_up(gross * f["sec_fee_rate"]) if f.get("sec_fee_rate") and date >= f.get("sec_fee_from", "") else 0
+        taf = min(f.get("taf_max", 1e18), cent_up(qty * f["taf_per_share"])) if f.get("taf_per_share") else 0
+        out["tax"] = cent(sec + taf)
+    return out
+
+
+def fx_spread(cfg):
+    return fee_cfg(cfg).get("fx_spread_rate", 0)
+
+
 # ---------- 상태 다시 만들기 ----------
 def replay(events):
-    st = {"cash": 0.0, "opened": None, "initial": 0.0, "lots": {}, "orders": {}, "fills": [],
-          "realized": {}, "last_buy": {}, "last_buy_ts": {}, "refused": [], "seen": set()}
+    st = {"cash": 0.0, "usd": 0.0, "opened": None, "initial": 0.0, "lots": {}, "orders": {}, "fills": [],
+          "realized": {}, "last_buy": {}, "last_buy_ts": {}, "refused": [], "seen": set(),
+          "moves": [],                # 돈·수량이 움직인 모든 일 {date, krw, usd, symbol, qty} — 자산 곡선에 쓴다
+          "costs": {"commission": 0.0, "tax": 0.0, "fx": 0.0},      # 낸 비용 (원화로)
+          "dividends": [], "div_by_order": {}, "splits": {}, "actions": set(), "us_gain": {}, "fx_log": []}
     for e in events:
         t, d = e["type"], e["data"]
         if t == "open":
@@ -127,33 +187,117 @@ def replay(events):
                            "gross_krw": sum(f["gross_krw"] for f in fs), "fee_krw": sum(f["fee_krw"] for f in fs),
                            "pieces": sum(f.get("pieces", 1) for f in fs), "chunks": len(fs),
                            "first_at": fs[0].get("first_at") or fs[0].get("at"), "total": o["qty_total"]}
-            st["cash"] += d["cash_delta"]
+            if any("fees" in f for f in fs):
+                o["result"]["fees"] = {k: round(sum((f.get("fees") or {}).get(k, 0) for f in fs), 2) for k in ("commission", "tax")}
+                o["result"]["gross"] = round(sum(f.get("gross", 0) for f in fs), 2)
+            # 돈: 옛 줄(ccy 없음)은 원화 한 주머니, 새 줄은 그 시장의 돈(delta)으로 움직인다
+            usd = d.get("ccy") == "USD"
+            amt = d["delta"] if "delta" in d else d["cash_delta"]
+            rate = d.get("fx") or 1.0 if usd else 1.0
+            if usd:
+                st["usd"] = round(st["usd"] + amt, 2)
+            else:
+                st["cash"] += amt
+            fees = d.get("fees")
+            if fees:
+                st["costs"]["commission"] += fees.get("commission", 0) * rate
+                st["costs"]["tax"] += fees.get("tax", 0) * rate
+            else:
+                st["costs"]["commission"] += d.get("fee_krw", 0)
             st["fills"].append({**d, "ts": e["ts"]})
+            st["moves"].append({"date": d["date"], "krw": 0 if usd else amt, "usd": amt if usd else 0,
+                                "symbol": d["symbol"], "qty": d["qty"] if d["side"] == "buy" else -d["qty"]})
             lots = st["lots"].setdefault(d["symbol"], [])
             if d["side"] == "buy":                      # 산 주문마다 한 묶음 — 팔 때 먼저 산 것부터 줄인다
-                lots.append({"order": d["order"], "qty": d["qty"], "cost_krw": -d["cash_delta"],
+                lots.append({"order": d["order"], "qty": d["qty"], "cost_krw": -amt * rate,
                              "unit_local": d["price"], "date": d["date"]})
                 st["last_buy"][d["symbol"]] = d["date"]
                 st["last_buy_ts"][d["symbol"]] = d.get("last_ts")
             else:
-                left, net = d["qty"], d["cash_delta"]
+                left, net = d["qty"], amt * rate
                 per_share = net / d["qty"]
                 while left > 0 and lots:
                     lot = lots[0]
                     take = min(left, lot["qty"])
                     cost = lot["cost_krw"] * take / lot["qty"]
-                    st["realized"][lot["order"]] = st["realized"].get(lot["order"], 0.0) + per_share * take - cost
+                    gain = per_share * take - cost
+                    st["realized"][lot["order"]] = st["realized"].get(lot["order"], 0.0) + gain
+                    if d.get("market") == "US":         # 해외 주식 양도소득세 어림용 (해마다)
+                        st["us_gain"][d["date"][:4]] = st["us_gain"].get(d["date"][:4], 0.0) + gain
                     lot["qty"] -= take
                     lot["cost_krw"] -= cost
                     left -= take
                     if lot["qty"] == 0:
                         lots.pop(0)
+        elif t == "fx":                                 # 환전 (주문으로 냈거나, 미국 주식을 살 때 모자라서 자동으로)
+            sgn = 1 if d["side"] == "buy" else -1
+            st["usd"] = round(st["usd"] + sgn * d["usd"], 2)
+            st["cash"] -= sgn * d["krw"]
+            st["costs"]["fx"] += d.get("cost_krw", 0)
+            st["moves"].append({"date": d["date"], "krw": -sgn * d["krw"], "usd": sgn * d["usd"], "symbol": None, "qty": 0})
+            st["fx_log"].append({**d, "ts": e["ts"]})
+            if d.get("order"):
+                o = st["orders"][d["order"]]
+                o["status"], o["filled_qty"] = "filled", d["usd"]
+                o["result"] = {**d, "ts": e["ts"], "qty": d["usd"], "total": d["usd"], "price": d["rate"], "fx": d["mid"],
+                               "gross_krw": d["krw"], "fee_krw": d.get("cost_krw", 0), "pieces": 1, "chunks": 1,
+                               "first_at": d.get("at"), "cash_after": d.get("krw_after")}
+        elif t == "dividend":                           # 배당이 세금을 떼고 예수금으로 들어왔다
+            usd = d.get("ccy") == "USD"
+            if usd:
+                st["usd"] = round(st["usd"] + d["net"], 2)
+            else:
+                st["cash"] += d["net"]
+            st["moves"].append({"date": e["ts"][:10], "krw": 0 if usd else d["net"], "usd": d["net"] if usd else 0,
+                                "symbol": None, "qty": 0})
+            st["dividends"].append({**d, "ts": e["ts"]})
+            st["actions"].add(("dividend", d["symbol"], d["ex_date"]))
+            lots = [l for l in st["lots"].get(d["symbol"], []) if l["date"] < d["ex_date"]]
+            q = sum(l["qty"] for l in lots)
+            for l in lots:                              # 산 주문별로 나눠 적는다 (이미 판 묶음 몫은 빠진다)
+                st["div_by_order"][l["order"]] = st["div_by_order"].get(l["order"], 0.0) + (d.get("net_krw") or 0) * l["qty"] / q
+        elif t == "split":                              # 액면분할·병합: 그 전에 산 묶음의 수량이 바뀐다 (원가는 그대로)
+            st["actions"].add(("split", d["symbol"], d["date"]))
+            st["splits"].setdefault(d["symbol"], []).append((d["date"], d["num"] / d["den"]))
+            lots = [l for l in st["lots"].get(d["symbol"], []) if l["date"] < d["date"]]
+            r = d["num"] / d["den"]
+            if lots:
+                raw = [l["qty"] * r for l in lots]
+                new = [math.floor(x + 1e-9) for x in raw]
+                spare = d["qty_after"] - sum(new)       # 1주 미만 자투리를 모아 생긴 주식은 자투리가 큰 묶음부터
+                for i in sorted(range(len(lots)), key=lambda i: new[i] - raw[i])[:max(0, spare)]:
+                    new[i] += 1
+                for l, n in zip(lots, new):
+                    l["qty"], l["unit_local"] = n, l["unit_local"] / r
+                st["lots"][d["symbol"]] = [l for l in st["lots"][d["symbol"]] if l["qty"] > 0]
+            cash = d.get("cash") or 0                   # 1주가 안 되는 자투리는 돈으로 받는다 (그만큼 주식 수에서 빠진다)
+            usd = d.get("ccy") == "USD"
+            if usd:
+                st["usd"] = round(st["usd"] + cash, 2)
+            else:
+                st["cash"] += cash
+            st["moves"].append({"date": d["date"], "krw": 0 if usd else cash, "usd": cash if usd else 0,
+                                "symbol": d["symbol"], "qty": d["qty_after"] - d["qty_before"] * r})
         # 그 밖의 줄(옛 장부의 결정·보고 등)은 거래소가 읽지 않는다
     return st
 
 
 def held(st, sym):
     return sum(l["qty"] for l in st["lots"].get(sym, []))
+
+
+def split_adj(st, sym, date):
+    """date 에 가진 1주가 지금 몇 주인가 (그 뒤에 장부에 적힌 분할·병합을 곱한 값). 시세가 분할 뒤 기준으로 고쳐지므로 필요하다."""
+    r = 1.0
+    for d, ratio in st["splits"].get(sym, []):
+        if d > date:
+            r *= ratio
+    return r
+
+
+def qty_before(st, sym, date):
+    """date 전날까지 들고 있던 수량 (지금 주식 수 기준)."""
+    return sum(m["qty"] * split_adj(st, sym, m["date"]) for m in st["moves"] if m["symbol"] == sym and m["date"] < date)
 
 
 # ---------- 체결 ----------
@@ -164,17 +308,143 @@ def kst_iso(ts):
     return datetime.fromtimestamp(ts, KST).isoformat(timespec="minutes") if ts else None
 
 
+def _day_ts(d, hour):
+    return datetime.strptime(d, "%Y-%m-%d").replace(tzinfo=KST).timestamp() + hour * 3600
+
+
+def action_ts(market, d):
+    """배당락·분할이 그날 장이 열리기 전에 일어난 것으로 보는 시각. 한국은 그날 0시, 미국은 한국 시각 13시
+    (앞 날 장후가 끝난 뒤, 그날 장전이 열리기 전)."""
+    return _day_ts(d, 0 if market == "KR" else 13)
+
+
+def pending_actions(st):
+    """시세 캐시에 있는데 아직 장부에 없는 배당·분할 가운데 이 계좌에 해당하는 것. 시각 순."""
+    out, t_now = [], now().timestamp()
+    opened = st["opened"] or ""
+    for sym in sorted({m["symbol"] for m in st["moves"] if m["symbol"]} |
+                      {o["symbol"] for o in st["orders"].values() if o["status"] in OPEN and o.get("market") != "FX"}):
+        c = px.load(HOME, sym)
+        ev = (c or {}).get("events") or {}
+        mkt = px.market_of(sym)
+        for d, (num, den) in sorted((ev.get("splits") or {}).items()):
+            ts = action_ts(mkt, d)
+            if d < opened or ts > t_now or ("split", sym, d) in st["actions"]:
+                continue
+            q = sum(l["qty"] for l in st["lots"].get(sym, []) if l["date"] < d)
+            stale = [o["id"] for o in st["orders"].values() if o["status"] in OPEN and o["symbol"] == sym
+                     and datetime.fromisoformat(o["ts"]).timestamp() < ts]
+            if q or stale:
+                out.append({"ts": ts, "kind": "split", "symbol": sym, "market": mkt, "date": d, "num": num, "den": den,
+                            "qty": q, "stale": stale, "cache": c})
+        for d, amount in sorted((ev.get("dividends") or {}).items()):
+            ts = action_ts(mkt, d)
+            if d < opened or ts > t_now or ("dividend", sym, d) in st["actions"]:
+                continue
+            q = math.floor(qty_before(st, sym, d) + 1e-6)
+            if q >= 1:
+                out.append({"ts": ts, "kind": "dividend", "symbol": sym, "market": mkt, "date": d, "amount": amount, "qty": q})
+    return sorted(out, key=lambda a: (a["ts"], a["kind"] != "split", a["symbol"]))
+
+
+def apply_action(a, st, cfg):
+    """배당·분할 하나를 장부에 적는다."""
+    sym, mkt = a["symbol"], a["market"]
+    usd = mkt == "US"
+    ccy = "USD" if usd else "KRW"
+    if a["kind"] == "split":
+        out = []
+        for oid in a["stale"]:                          # 값의 기준이 바뀌므로 걸려 있던 주문은 거둔다 (실제 증권사도 그렇다)
+            out.append(append("cancel", {"order": oid, "why": "액면분할·병합으로 값의 기준이 바뀌어 주문을 거두었습니다. 새 값에 맞춰 다시 내 주세요."}))
+        r = a["num"] / a["den"]
+        exact = a["qty"] * r
+        after = math.floor(exact + 1e-9)
+        bar = px.close_on_or_before(a["cache"], a["date"])
+        frac = exact - after
+        cash = 0
+        if frac > 1e-9 and bar:
+            cash = cent(frac * bar["c"]) if usd else won_floor(frac * bar["c"])
+        out.append(append("split", {"symbol": sym, "market": mkt, "date": a["date"], "num": a["num"], "den": a["den"],
+                                    "qty_before": a["qty"], "qty_after": after, "cash": cash, "ccy": ccy}))
+        return out
+    rate_tax = (fee_cfg(cfg).get("dividend_tax") or {}).get(mkt, 0)
+    gross = a["qty"] * a["amount"]
+    gross = cent(gross) if usd else won_floor(gross)
+    tax = cent(gross * rate_tax) if usd else won_floor(gross * rate_tax)
+    net = cent(gross - tax) if usd else gross - tax
+    fx = px.fx_at(HOME, now().timestamp(), px.load(HOME, px.FX_KEY))[0] if usd else 1.0
+    return [append("dividend", {
+        "symbol": sym, "market": mkt, "ex_date": a["date"], "per_share": a["amount"], "qty": a["qty"], "ccy": ccy,
+        "gross": gross, "tax": tax, "tax_rate": rate_tax, "net": net, "fx": fx,
+        "gross_krw": round(gross * fx) if fx else None, "tax_krw": round(tax * fx) if fx else None,
+        "net_krw": round(net * fx) if fx else None,
+        "cash_after": round(st["cash"] + (0 if usd else net)), "usd_after": round(st["usd"] + (net if usd else 0), 2)})]
+
+
+def fx_event(o, today):
+    """환전 주문의 다음 사건. 주문 뒤에 시작한 1분 환율의 시작 값으로 바꾼다. 1분 환율이 없으면 다음 날 하루 환율의 시작 값."""
+    start = datetime.fromisoformat(o["ts"]).timestamp()
+    d0 = datetime.fromtimestamp(start - 86400, KST).strftime("%Y-%m-%d")
+    for d in px.minute_dates(HOME, px.FX_KEY):
+        if d < d0:
+            continue
+        for b in px.load_minutes(HOME, px.FX_KEY, d)["bars"]:
+            if b[0] >= start:
+                return ("fill", {"sort_ts": b[0], "ts": b[0], "mid": b[1], "precision": "1분",
+                                 "date": datetime.fromtimestamp(b[0], KST).strftime("%Y-%m-%d")})
+    daily = px.load(HOME, px.FX_KEY)
+    placed = datetime.fromisoformat(o["ts"]).astimezone(KST).strftime("%Y-%m-%d")
+    for b in (daily["bars"] if daily else []):
+        if placed < b["d"] <= o["valid_until"]:
+            return ("fill", {"sort_ts": _day_ts(b["d"], 9), "ts": None, "mid": b["o"], "precision": "하루", "date": b["d"]})
+    if today > o["valid_until"]:
+        return ("expire", f"유효기간({o['valid_until']})까지 환율을 받지 못함")
+    return None
+
+
+def fill_fx(o, f, st, cfg):
+    """환전 주문 체결. 살 때는 기준 환율보다 비싸게, 팔 때는 싸게 (그 차이가 환전 비용)."""
+    s, mid = fx_spread(cfg), f["mid"]
+    if o["side"] == "buy":
+        rate = mid * (1 + s)
+        usd = float(o["usd"]) if o.get("usd") else math.floor(o["krw"] / rate * 100 + 1e-6) / 100
+        krw = math.ceil(usd * rate - 1e-6)
+        if usd < 0.01:
+            return append("reject", {"order": o["id"], "why": "환전 금액이 1센트보다 작음"})
+        if krw > st["cash"] + 0.5:
+            return append("reject", {"order": o["id"], "date": f["date"],
+                                     "why": f"원화 예수금 부족 — 필요 {krw:,}원, 보유 {round(st['cash']):,}원"})
+    else:
+        rate = mid * (1 - s)
+        usd = st["usd"] if o.get("usd") in (None, "all") else float(o["usd"])
+        if usd < 0.01 or usd > st["usd"] + 0.005:
+            return append("reject", {"order": o["id"], "date": f["date"],
+                                     "why": f"달러 예수금 부족 — 주문 {usd:,.2f}달러, 보유 {st['usd']:,.2f}달러"})
+        krw = won_floor(usd * rate)
+    sgn = 1 if o["side"] == "buy" else -1
+    return append("fx", {"order": o["id"], "ref": o.get("ref", ""), "side": o["side"], "usd": round(usd, 2),
+                         "mid": mid, "rate": round(rate, 4), "krw": krw, "cost_krw": round(usd * mid * s),
+                         "date": f["date"], "at": kst_iso(f["ts"]), "last_ts": f["ts"], "precision": f["precision"],
+                         "krw_after": round(st["cash"] - sgn * krw), "usd_after": round(st["usd"] + sgn * usd, 2)})
+
+
 def settle():
-    """살아 있는 주문을 시간 순서대로 체결한다. 계산은 matching.py, 여기서는 돈·수량 확인과 장부 기록."""
+    """살아 있는 주문과 배당·분할을 시간 순서대로 처리한다. 계산은 matching.py, 여기서는 돈·수량 확인과 장부 기록."""
     cfg = config()
-    fee_rate = cfg["fee_rate"]
+    spread = fx_spread(cfg)
     today = now().date().isoformat()
     done = []
     while True:
         st = replay(read_ledger())
         live = [o for o in st["orders"].values() if o["status"] in OPEN]
-        if not live:
+        acts = pending_actions(st)
+        if not live and not acts:
             break
+        # 분할·병합은 언제나 먼저: 시세 원천이 지난 값까지 새 기준으로 고쳐 주므로, 옛 기준으로 걸어 둔 주문을 그 시세에 대 보면 안 된다
+        splits = [x for x in acts if x["kind"] == "split"]
+        if splits:
+            done += apply_action(splits[0], st, cfg)
+            continue
         fx_daily = px.load(HOME, px.FX_KEY)
 
         def rate_at(market, ts):
@@ -185,20 +455,24 @@ def settle():
         best = None
         for o in live:
             sym = o["symbol"]
+            if o["market"] == "FX":
+                ev = fx_event(o, today)
+            else:
+                def size_fn(price, ts, o=o):
+                    r = rate_at(o["market"], ts)
+                    if o["market"] == "US" and r:
+                        r *= 1 + spread                 # 금액 주문은 전부 환전해서 산다고 보고 넉넉히 잡는다
+                    return math.floor(o["krw"] / (price * r * (1 + buy_load(cfg, o["market"])))) if r else 0
 
-            def size_fn(price, ts, o=o):
-                r = rate_at(o["market"], ts)
-                return math.floor(o["krw"] / (price * r * (1 + fee_rate))) if r else 0
-
-            ctx = {"daily": px.load(HOME, sym), "minutes": lambda d, sym=sym: px.load_minutes(HOME, sym, d),
-                   "minute_dates": px.minute_dates(HOME, sym), "held": held(st, sym),
-                   "pending_buy": any(x["status"] in OPEN and x["symbol"] == sym and x["side"] == "buy"
-                                      for x in st["orders"].values()),
-                   "last_buy_ts": st["last_buy_ts"].get(sym), "last_buy_date": st["last_buy"].get(sym),
-                   "size_fn": size_fn, "cfg": cfg, "today": today,
-                   "ext_cap_fn": lambda price, ts, o=o: math.floor(
-                       cfg.get("ext_max_krw_per_min", 0) / (price * (rate_at(o["market"], ts) or 1e18)))}
-            ev = mt.next_event(o, ctx)
+                ctx = {"daily": px.load(HOME, sym), "minutes": lambda d, sym=sym: px.load_minutes(HOME, sym, d),
+                       "minute_dates": px.minute_dates(HOME, sym), "held": held(st, sym),
+                       "pending_buy": any(x["status"] in OPEN and x["symbol"] == sym and x["side"] == "buy"
+                                          for x in st["orders"].values()),
+                       "last_buy_ts": st["last_buy_ts"].get(sym), "last_buy_date": st["last_buy"].get(sym),
+                       "size_fn": size_fn, "cfg": cfg, "today": today,
+                       "ext_cap_fn": lambda price, ts, o=o: math.floor(
+                           cfg.get("ext_max_krw_per_min", 0) / (price * (rate_at(o["market"], ts) or 1e18)))}
+                ev = mt.next_event(o, ctx)
             if ev is None:
                 continue
             if ev[0] in ("expire", "reject"):
@@ -207,6 +481,10 @@ def settle():
             key = (ev[1]["sort_ts"], o["id"])
             if best is None or key < best[0]:
                 best = (key, o, ev)
+        # 배당·분할이 다음 체결보다 먼저(같은 시각 포함)면 그것부터
+        if acts and (best is None or (best[2][0] == "fill" and acts[0]["ts"] <= best[0][0])):
+            done += apply_action(acts[0], st, cfg)
+            continue
         if best is None:
             break
         _, o, ev = best
@@ -221,20 +499,49 @@ def settle():
             done.append(append("reject", {"order": o["id"], "why": why}))
             continue
         f = ev[1]
+        if o["market"] == "FX":
+            done.append(fill_fx(o, f, st, cfg))
+            continue
         ts = f["last_ts"] or f["sort_ts"]
         rate = rate_at(o["market"], ts)
         if rate is None:
             break                                       # 환율이 아직 없다 — 다음 실행에서
-        gross = f["qty"] * f["price"] * rate
-        fee = gross * fee_rate
+        usd = o["market"] == "US"
+        gross = cent(f["qty"] * f["price"]) if usd else round(f["qty"] * f["price"])
+        etf = ((px.load(HOME, o["symbol"]) or {}).get("kind") == "etf")
+        fees = trade_costs(cfg, o["market"], o["side"], f["qty"], gross, f["date"], etf)
+        fee = fees["commission"] + fees["tax"]
+        krw_bal, usd_bal = st["cash"], st["usd"]
         if o["side"] == "buy":
-            if gross + fee > st["cash"] + 0.5:
+            need = cent(gross + fee) if usd else gross + fee
+            if usd and need > usd_bal + 0.005:          # 달러가 모자란다
+                short = cent(need - usd_bal)
+                krw_need = math.ceil(short * rate * (1 + spread) - 1e-6)
+                if cfg.get("usd_shortfall", "auto") != "auto":
+                    done.append(append("reject", {"order": o["id"], "date": f["date"],
+                                                  "why": f"달러 예수금 부족 — 필요 {need:,.2f}달러, 보유 {usd_bal:,.2f}달러"}))
+                    continue
+                if krw_need > krw_bal + 0.5:
+                    done.append(append("reject", {"order": o["id"], "date": f["date"],
+                                                  "why": f"현금 부족 — 필요 {krw_need:,}원(모자란 {short:,.2f}달러 환전), 보유 {round(krw_bal):,}원"}))
+                    continue
+                krw_bal, usd_bal = krw_bal - krw_need, round(usd_bal + short, 2)
+                done.append(append("fx", {"order": None, "for": o["id"], "auto": True, "side": "buy", "usd": short,
+                                          "mid": rate, "rate": round(rate * (1 + spread), 4), "krw": krw_need,
+                                          "cost_krw": round(short * rate * spread), "date": f["date"],
+                                          "at": kst_iso(f["last_ts"]), "last_ts": f["last_ts"], "precision": f["precision"],
+                                          "krw_after": round(krw_bal), "usd_after": usd_bal}))
+            elif not usd and need > krw_bal + 0.5:
                 done.append(append("reject", {"order": o["id"], "date": f["date"],
-                                              "why": f"현금 부족 — 필요 {round(gross + fee):,}원, 보유 {round(st['cash']):,}원"}))
+                                              "why": f"현금 부족 — 필요 {round(need):,}원, 보유 {round(krw_bal):,}원"}))
                 continue
-            delta = -(gross + fee)
+            delta = -need
         else:
-            delta = gross - fee
+            delta = cent(gross - fee) if usd else gross - fee
+        if usd:
+            usd_bal = round(usd_bal + delta, 2)
+        else:
+            krw_bal += delta
         done.append(append("fill", {
             "order": o["id"], "ref": o.get("ref", ""), "symbol": o["symbol"], "market": o["market"],
             "side": o["side"], "date": f["date"], "price": f["price"], "fx": rate, "qty": f["qty"],
@@ -242,8 +549,9 @@ def settle():
             "at": kst_iso(f["last_ts"]), "first_at": kst_iso(f["first_ts"]), "last_ts": f["last_ts"],
             "precision": f["precision"], "pieces": f["pieces"], "triggered": f["triggered"],
             "session": f.get("session") or "r",
-            "gross_krw": round(gross), "fee_krw": round(fee), "cash_delta": round(delta),
-            "cash_after": round(st["cash"] + round(delta))}))
+            "ccy": "USD" if usd else "KRW", "gross": gross, "fees": fees, "delta": delta, "etf": etf,
+            "gross_krw": round(gross * rate), "fee_krw": round(fee * rate), "cash_delta": round(delta * rate),
+            "cash_after": round(krw_bal), "usd_after": usd_bal}))
     return done
 
 
@@ -252,6 +560,7 @@ def needed_keys(st, cfg):
     keys = {b["symbol"] for b in cfg["benchmark"]} | {px.FX_KEY}
     keys |= {s for s, l in st["lots"].items() if l}
     keys |= {o["symbol"] for o in st["orders"].values()}
+    keys |= {m["symbol"] for m in st["moves"] if m["symbol"]}      # 판 뒤에 확인되는 배당도 있다
     return sorted(keys)
 
 
@@ -279,8 +588,15 @@ def build():
         return b["c"] * rate, b
 
     def name(sym):
+        if sym == px.FX_KEY:
+            return "달러 환전"
         c = caches.get(sym)
         return c["name"] if c else sym
+
+    fx_bar = px.close_on_or_before(fx, today)
+    fx_now = fx_bar["c"] if fx_bar else (st["fx_log"][-1]["mid"] if st["fx_log"] else None)
+    usd_krw = st["usd"] * fx_now if fx_now else 0.0      # 달러 예수금의 원화 값어치 (오늘 환율)
+    cash_all = st["cash"] + usd_krw
 
     # 보유 종목
     positions, invested = [], 0.0
@@ -307,7 +623,7 @@ def build():
                           "value_krw": round(value), "cost_krw": round(cost),
                           "pnl_krw": round(value - cost), "pnl_pct": round((value / cost - 1) * 100, 2) if cost else 0,
                           "orders": sorted({l["order"] for l in lots})})
-    total = st["cash"] + invested
+    total = cash_all + invested
     for p in positions:
         p["weight"] = round(p["value_krw"] / total * 100, 1) if total else 0
     positions.sort(key=lambda p: -p["value_krw"])
@@ -322,12 +638,18 @@ def build():
     for b in cfg["benchmark"]:
         base[b["symbol"]] = krw(b["symbol"], opened)[0]
     equity = []
+    last_d = max(dates)
     for d in sorted(dates):
-        cash, qty = st["initial"], {}
-        for f in st["fills"]:
-            if f["date"] <= d:
-                cash += f["cash_delta"]
-                qty[f["symbol"]] = qty.get(f["symbol"], 0) + (f["qty"] if f["side"] == "buy" else -f["qty"])
+        cash, usd, qty = st["initial"], 0.0, {}
+        for m in st["moves"]:
+            if m["date"] <= d or d == last_d:           # 마지막 점은 지금 상태 (시세 기준일 뒤에 생긴 환전·배당 포함)
+                cash += m["krw"]
+                usd += m["usd"]
+                if m["symbol"]:                         # 시세가 분할 뒤 기준이므로 수량도 지금 주식 수로 센다
+                    qty[m["symbol"]] = qty.get(m["symbol"], 0) + m["qty"] * split_adj(st, m["symbol"], m["date"])
+        if abs(usd) >= 0.005:
+            f = px.close_on_or_before(fx, d)
+            cash += usd * (f["c"] if f else (fx_now or 0))
         val = 0.0
         for s, q in qty.items():
             u = krw(s, d)[0]
@@ -353,7 +675,8 @@ def build():
     for o in st["orders"].values():
         if o["side"] == "buy" and o["filled_qty"]:
             r, u = st["realized"].get(o["id"], 0.0), unreal.get(o["id"], 0.0)
-            order_pnl[o["id"]] = {"realized_krw": round(r), "unrealized_krw": round(u), "total_krw": round(r + u)}
+            order_pnl[o["id"]] = {"realized_krw": round(r), "unrealized_krw": round(u), "total_krw": round(r + u),
+                                  "dividend_krw": round(st["div_by_order"].get(o["id"], 0.0))}
 
     orders = [{**o, "name": name(o["symbol"])} for o in st["orders"].values()]
 
@@ -363,6 +686,12 @@ def build():
         t, d = e["type"], e["data"]
         if t == "open":
             txt = f"계좌를 열었습니다. 시작 금액 {int(d['initial_cash']):,}원."
+        elif t == "order" and d.get("market") == "FX":
+            if d["side"] == "buy":
+                amt = f"{int(d['krw']):,}원을 달러로" if d.get("krw") else f"{d['usd']:,.2f}달러 사기"
+            else:
+                amt = "달러 전부를 원화로" if d.get("usd") in (None, "all") else f"{d['usd']:,.2f}달러를 원화로"
+            txt = f"주문 {d['id']} — 환전 {amt}"
         elif t == "order":
             how = {"market": "시장가", "moc": "종가"}.get(d["type"]) or f"{'지정가' if d['type'] == 'limit' else '손절가'} {d['price']:,}"
             if d.get("session") == "all":
@@ -374,8 +703,32 @@ def build():
             if d.get("session") in ("pre", "post"):
                 when += " " + px.SESSION_KO[d["session"]]
             part = f" (주문 {d['total']}주 중, 남은 {d['remaining']}주)" if d.get("remaining") else ""
+            fees = d.get("fees")
+            if fees and d.get("ccy") == "USD":
+                cost = f"수수료 {fees['commission']:,.2f}달러" + (f", 매도 제비용 {fees['tax']:,.2f}달러" if fees.get("tax") else "")
+                money = f"금액 {d['gross']:,.2f}달러({d['gross_krw']:,}원)"
+            elif fees:
+                cost = f"수수료 {fees['commission']:,}원" + (f", 거래세 {fees['tax']:,}원" if fees.get("tax") else "")
+                money = f"금액 {d['gross_krw']:,}원"
+            else:
+                cost, money = f"비용 {d['fee_krw']:,}원", f"금액 {d['gross_krw']:,}원"
             txt = (f"체결 {d['order']} — {name(d['symbol'])} {d['qty']}주 {'샀습니다' if d['side'] == 'buy' else '팔았습니다'}{part}. "
-                   f"{when} 가격 {d['price']:,}, 금액 {d['gross_krw']:,}원, 비용 {d['fee_krw']:,}원.")
+                   f"{when} 가격 {d['price']:,}, {money}, {cost}.")
+        elif t == "fx":
+            when = (d.get("at") or d["date"]).replace("T", " ")[:16]
+            head = f"환전 {d['order']}" if d.get("order") else f"자동 환전({d.get('for')} 매수에 모자란 달러)"
+            way = (f"{d['krw']:,}원 → {d['usd']:,.2f}달러" if d["side"] == "buy" else f"{d['usd']:,.2f}달러 → {d['krw']:,}원")
+            txt = f"{head} — {way}. {when} 기준 환율 {d['mid']:,.2f}원, 적용 {d['rate']:,.2f}원, 환전 비용 {d.get('cost_krw', 0):,}원."
+        elif t == "dividend":
+            unit = "달러" if d.get("ccy") == "USD" else "원"
+            n = (lambda v: f"{v:,.2f}") if d.get("ccy") == "USD" else (lambda v: f"{v:,}")
+            txt = (f"배당 — {name(d['symbol'])} {d['qty']}주 × 주당 {d['per_share']:,}{unit} = {n(d['gross'])}{unit}. "
+                   f"세금 {n(d['tax'])}{unit}({d['tax_rate'] * 100:g}%)을 떼고 {n(d['net'])}{unit}이 예수금으로 들어왔습니다. 배당락일 {d['ex_date']}.")
+        elif t == "split":
+            kind = "액면분할" if d["num"] > d["den"] else "주식 병합"
+            txt = f"{kind} — {name(d['symbol'])} {d['den']:g}주가 {d['num']:g}주로. 보유 {d['qty_before']}주 → {d['qty_after']}주 (산 값 총액은 그대로)."
+            if d.get("cash"):
+                txt += f" 1주가 안 되는 자투리는 {d['cash']:,}{'달러' if d.get('ccy') == 'USD' else '원'}으로 받았습니다."
         elif t == "reject":
             txt = f"거부 {d['order']} — {d['why']}"
         elif t == "expire":
@@ -389,32 +742,49 @@ def build():
         feed.append({"seq": e["seq"], "ts": e["ts"], "type": t, "text": txt})
 
     asof = {k: (caches[k]["bars"][-1]["d"] if caches.get(k) and caches[k]["bars"] else None) for k in keys}
+    costs = {k + "_krw": round(v) for k, v in st["costs"].items()}
+    divs = [{**d, "name": name(d["symbol"])} for d in reversed(st["dividends"])]
+    fc = fee_cfg(cfg)
+    year = today[:4]
+    gt = fc.get("us_gains_tax")
+    gain = st["us_gain"].get(year, 0.0)
+    us_gains = None
+    if gt:                                              # 떼지 않고 보여 주기만 하는 어림 (사용자 결정 2026-11-14)
+        us_gains = {"year": year, "realized_krw": round(gain), "deduction_krw": gt["deduction_krw"], "rate": gt["rate"],
+                    "est_tax_krw": round(max(0.0, gain - gt["deduction_krw"]) * gt["rate"])}
     out = {
         "account": cfg["account_name"], "updated": now().isoformat(timespec="seconds"),
-        "opened": opened, "initial": st["initial"], "fee_rate": cfg["fee_rate"],
+        "opened": opened, "initial": st["initial"], "fee_rate": fc.get("KR", {}).get("commission_rate", cfg.get("fee_rate", 0)),
+        "fees": fc,
         "rules": cfg["rules"],
         "benchmark": [{**b, "name": name(b["symbol"])} for b in cfg["benchmark"]],
         "summary": {
-            "total": round(last["total"]), "cash": round(st["cash"]), "invested": round(invested),
-            "cash_pct": round(st["cash"] / total * 100, 1) if total else 100,
+            "total": round(last["total"]), "cash": round(cash_all), "invested": round(invested),
+            "cash_pct": round(cash_all / total * 100, 1) if total else 100,
+            "cash_krw": round(st["cash"]), "cash_usd": round(st["usd"], 2), "cash_usd_krw": round(usd_krw),
             "ext_delta_krw": sum(p["ext"]["value_krw"] - p["value_krw"] for p in positions
                                  if p.get("ext") and p["ext"].get("value_krw") is not None),
             "pnl_krw": round(last["total"] - st["initial"]),
             "pnl_pct": round((last["total"] / st["initial"] - 1) * 100, 2) if st["initial"] else 0,
             "bench_pct": round((last["bench"] / st["initial"] - 1) * 100, 2) if last.get("bench") else None,
-            "fees_krw": sum(f["fee_krw"] for f in st["fills"]),
+            "fees_krw": sum(costs.values()), "costs": costs,
+            "dividends": {"count": len(divs), "gross_krw": sum(d.get("gross_krw") or 0 for d in divs),
+                          "tax_krw": sum(d.get("tax_krw") or 0 for d in divs),
+                          "net_krw": sum(d.get("net_krw") or 0 for d in divs)},
+            "us_gains": us_gains,
             "n_orders": len(orders), "n_filled": sum(o["status"] == "filled" for o in orders),
             "n_pending": sum(o["status"] in OPEN for o in orders),
         },
         "positions": positions, "equity": equity,
         "orders": sorted(orders, key=lambda o: o["id"], reverse=True),
         "order_pnl": order_pnl,
+        "dividends": divs,
         "refused": list(reversed(st["refused"])),
         "feed": feed[:300],
         "integrity": {"ok": ok, "lines": len(events), "head": events[-1]["hash"][:12] if events else None,
                       "broken_at": None if ok else n},
         "prices_asof": asof,
-        "fx": px.close_on_or_before(fx, today)["c"] if fx and fx["bars"] else None,
+        "fx": fx_now,
     }
     STATE_OUT.parent.mkdir(parents=True, exist_ok=True)
     STATE_OUT.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -432,7 +802,7 @@ def cmd_open(a):
         sys.exit("이미 열린 계좌입니다.")
     cfg = config()
     append("open", {"account": cfg["account_name"], "initial_cash": cfg["initial_cash"],
-                    "opened": now().date().isoformat(), "fee_rate": cfg["fee_rate"], "rules": cfg["rules"]})
+                    "opened": now().date().isoformat(), "fees": fee_cfg(cfg), "rules": cfg["rules"]})
     print(f"계좌 개설: {cfg['account_name']} · {cfg['initial_cash']:,}원")
 
 
@@ -448,6 +818,8 @@ def place_order(p):
     if st["opened"] is None:
         raise Refused("계좌가 없습니다")
     sym = str(p.get("symbol", "")).upper()
+    if sym in ("USD", px.FX_KEY):
+        return place_fx_order(p, st, cfg)
     side, typ, price = p.get("side"), p.get("type") or "market", p.get("price")
     session = p.get("session") or "regular"
     qty, krw_amt = p.get("qty"), p.get("krw")
@@ -496,8 +868,15 @@ def place_order(p):
                     fxd = px.load(HOME, px.FX_KEY)
                     rate = fxd["bars"][-1]["c"] if fxd and fxd["bars"] else None
                 need = data["qty"] * ref * rate if rate else None
-        if need is not None and need > st["cash"]:
-            raise Refused(f"주문 가능 금액이 모자랍니다 — 필요 약 {round(need):,}원, 현금 {round(st['cash']):,}원")
+        have, what = st["cash"], f"원화 예수금 {round(st['cash']):,}원"
+        if mkt == "US":                                  # 달러 예수금을 먼저 쓰고, 모자라면 원화를 환전해 산다(자동 환전일 때)
+            fxd = px.load(HOME, px.FX_KEY)
+            r = fxd["bars"][-1]["c"] if fxd and fxd["bars"] else 0
+            auto = cfg.get("usd_shortfall", "auto") == "auto"
+            have = st["usd"] * r + (st["cash"] if auto else 0)
+            what = (f"원화 {round(st['cash']):,}원 + 달러 {st['usd']:,.2f}" if auto else f"달러 예수금 {st['usd']:,.2f}달러")
+        if need is not None and need > have:
+            raise Refused(f"주문 가능 금액이 모자랍니다 — 필요 약 {round(need):,}원, {what}")
     else:
         if krw_amt:
             raise Refused("팔 때는 주 수 또는 전량(all)으로 적습니다.")
@@ -513,9 +892,47 @@ def place_order(p):
     return data["id"]
 
 
+def place_fx_order(p, st, cfg):
+    """환전 주문 접수. 사기 = 원화를 달러로(원화 금액 krw 또는 달러 금액 usd), 팔기 = 달러를 원화로(usd 금액 또는 all)."""
+    side, usd, krw_amt = p.get("side"), p.get("usd"), p.get("krw")
+    if side not in ("buy", "sell") or (p.get("type") or "market") != "market" or p.get("price") is not None \
+            or (p.get("session") or "regular") != "regular" or p.get("qty"):
+        raise Refused("환전 주문은 사기·팔기와 금액만 적습니다 (값을 정해 두는 환전은 없습니다).")
+    try:
+        usd = None if usd in (None, "", "all") else round(float(usd), 2)
+        krw_amt = float(krw_amt) if krw_amt else None
+    except (TypeError, ValueError):
+        raise Refused("환전 금액을 읽을 수 없습니다")
+    data = {"ref": p.get("ref") or "", "symbol": px.FX_KEY, "market": "FX", "side": side, "type": "market",
+            "price": None, "session": "regular"}
+    if p.get("client_id"):
+        data["client_id"] = p["client_id"]
+        data["requested_at"] = p.get("requested_at")
+    fxd = px.load(HOME, px.FX_KEY)
+    rate = fxd["bars"][-1]["c"] if fxd and fxd["bars"] else None
+    if side == "buy":
+        if (usd is None) == (krw_amt is None) or (usd or krw_amt) <= 0:
+            raise Refused("달러를 살 때는 원화 금액 또는 달러 금액 중 하나만 적습니다.")
+        need = krw_amt if krw_amt else (usd * rate * (1 + fx_spread(cfg)) if rate else None)
+        if need is not None and need > st["cash"]:
+            raise Refused(f"주문 가능 금액이 모자랍니다 — 필요 약 {round(need):,}원, 원화 예수금 {round(st['cash']):,}원")
+        data["krw" if krw_amt else "usd"] = krw_amt or usd
+    else:
+        if krw_amt or (usd is not None and usd <= 0):
+            raise Refused("달러를 팔 때는 달러 금액 또는 전부(all)로 적습니다.")
+        if st["usd"] < 0.01 or (usd or 0) > st["usd"] + 0.005:
+            raise Refused(f"달러 예수금이 모자랍니다 — 보유 {st['usd']:,.2f}달러")
+        data["usd"] = "all" if usd is None else usd
+    days = int(p.get("valid_days") or cfg["order_valid_days"])
+    data["valid_until"] = (now().date() + timedelta(days=days)).isoformat()
+    data["id"] = f"O{len(st['orders']) + 1:04d}"
+    append("order", data)
+    return data["id"]
+
+
 def cmd_order(a):
     try:
-        print(place_order({"symbol": a.symbol, "side": a.side, "type": a.type, "qty": a.qty, "krw": a.krw,
+        print(place_order({"symbol": a.symbol, "side": a.side, "type": a.type, "qty": a.qty, "krw": a.krw, "usd": a.usd,
                            "price": a.price, "session": a.session, "valid_days": a.valid_days, "ref": a.ref}))
     except Refused as e:
         sys.exit(str(e))
@@ -581,7 +998,7 @@ def cmd_update(a):
             print(f"  {k:8s} 수집 실패: {e}")
     # 1분 시세: 살아 있는 주문·보유 종목만 (체결 계산에 쓰인다). 미국 종목이 있으면 환율도.
     need = {o["symbol"] for o in st["orders"].values() if o["status"] in OPEN} | {s for s, l in st["lots"].items() if l}
-    if any(px.market_of(k) == "US" for k in need):
+    if any(px.market_of(k) == "US" for k in need) or st["usd"] >= 0.01:
         need.add(px.FX_KEY)
     for k in sorted(need):
         try:
@@ -596,6 +1013,12 @@ def cmd_settle(a):
         d = e["data"]
         if e["type"] == "fill":
             print(f"  체결 {d['order']} {d['symbol']} {d['side']} {d['qty']}주 @ {d['price']} ({d['date']})")
+        elif e["type"] == "fx":
+            print(f"  환전 {d.get('order') or d.get('for')} {d['side']} {d['usd']:,.2f}달러 ↔ {d['krw']:,}원 (적용 환율 {d['rate']})")
+        elif e["type"] == "dividend":
+            print(f"  배당 {d['symbol']} {d['qty']}주 세금 뗀 뒤 {d['net']:,} {d['ccy']} (배당락일 {d['ex_date']})")
+        elif e["type"] == "split":
+            print(f"  분할·병합 {d['symbol']} {d['den']}→{d['num']} · {d['qty_before']}주 → {d['qty_after']}주 ({d['date']})")
         else:
             print(f"  {e['type']} {d['order']} — {d['why']}")
 
@@ -616,7 +1039,7 @@ def cmd_daily(a):
 def cmd_status(a):
     st = replay(read_ledger())
     need_open(st)
-    print(f"현금 {round(st['cash']):,}원")
+    print(f"원화 예수금 {round(st['cash']):,}원 · 달러 예수금 {st['usd']:,.2f}달러")
     for sym, lots in st["lots"].items():
         q = sum(l["qty"] for l in lots)
         if q:
@@ -639,8 +1062,9 @@ def main():
     s = sub.add_parser("order")
     s.add_argument("--ref"); s.add_argument("--symbol", required=True)   # --ref: 운용자가 붙이는 꼬리표 (거래소는 읽지 않는다)
     s.add_argument("--side", required=True, choices=["buy", "sell"])
-    s.add_argument("--type", default="market", choices=["market", "moc", "limit", "stop"])
+    s.add_argument("--type", default=None, choices=["market", "moc", "limit", "stop"])
     s.add_argument("--qty"); s.add_argument("--krw", type=float); s.add_argument("--price", type=float)
+    s.add_argument("--usd")                                                # 환전 주문(--symbol USD)의 달러 금액 또는 all
     s.add_argument("--valid-days", type=int, dest="valid_days")
     s.add_argument("--session", default="regular", choices=["regular", "all"])   # all = 장전·장후에도 (지정가만)
     s.set_defaults(f=cmd_order)
