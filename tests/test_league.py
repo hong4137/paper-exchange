@@ -47,10 +47,10 @@ def run(now, *args, ok=True, env=None):
     return r
 
 
-def issue(now, author, number, body):
+def issue(now, author, number, body, title="[주문] 시험"):
     reply = tmp / "reply.md"
     reply.unlink(missing_ok=True)
-    run(now, "issue", env={"PAPER_ISSUE_AUTHOR": author, "PAPER_ISSUE_NUMBER": str(number),
+    run(now, "issue", env={"PAPER_ISSUE_AUTHOR": author, "PAPER_ISSUE_NUMBER": str(number), "PAPER_ISSUE_TITLE": title,
                            "PAPER_ISSUE_BODY": body if isinstance(body, str) else json.dumps(body, ensure_ascii=False),
                            "PAPER_REPLY": str(reply)})
     return reply.read_text(encoding="utf-8")
@@ -106,6 +106,45 @@ n = len(ledger("alice"))
 issue(MON, "alice", 11, {"symbol": "000010", "side": "buy", "qty": 100, "type": "moc"})
 check("같은 이슈를 두 번 처리해도 주문은 한 번", len(ledger("alice")) == n)
 check("파일 이름이 될 수 없는 계정은 계좌가 생기지 않는다", sorted(p.name for p in (tmp / "accounts").iterdir()) == ["alice", "bob99"])
+n_alice = len(ledger("alice"))
+
+# 로그인이 있는 화면에서 들어오는 주문: inbox/{계정}/ 폴더가 곧 계좌
+box = tmp / "inbox"
+(box / "alice").mkdir(parents=True)
+(box / "bob99").mkdir()
+(box / "mallory").mkdir()
+(box / "alice" / "w1.json").write_text(json.dumps({"client_id": "web-1", "account": "bob99", "symbol": "000010", "side": "buy", "qty": 1,
+                                                    "type": "limit", "price": 8400}), encoding="utf-8")
+(box / "bob99" / "w2.json").write_text(json.dumps({"symbol": "ZZZ", "side": "sell", "qty": 1}), encoding="utf-8")
+(box / "mallory" / "w3.json").write_text(json.dumps({"symbol": "000010", "side": "buy", "qty": 1}), encoding="utf-8")
+n_own = len(ledger())
+out = run(MON, "ingest").stdout
+check("계좌별 창구: 폴더 이름의 계좌로 접수된다 (요청 안의 계좌 이름은 보지 않는다)", ledger("alice")[-1]["type"] == "order"
+      and ledger("alice")[-1]["data"]["client_id"] == "web-1" and ledger("bob99")[-1]["type"] == "refuse" and len(ledger()) == n_own, out)
+check("처리한 요청 파일은 치우고, 명단에 없는 폴더는 건드리지 않는다", not list((box / "alice").glob("*.json")) and not list((box / "bob99").glob("*.json"))
+      and (box / "mallory" / "w3.json").exists() and "명단에 없는" in out, out)
+
+# 관리 이슈: 주인 계정만 참가자를 넣고 빼고 대회를 정한다
+r = issue(MON, "alice", 30, {"action": "add_player", "github": "carol"}, title="[관리] 넣기")
+check("주인이 아닌 계정의 관리 명령은 받지 않는다", "주인만" in r and not (tmp / "accounts" / "carol").exists()
+      and len(json.loads((tmp / "config.json").read_text(encoding="utf-8"))["players"]) == 4, r)
+r = issue(MON, "owner-kim", 31, [{"action": "add_player", "github": "Carol", "name": "캐럴", "agent": "새 에이전트"},
+                                  {"action": "add_contest", "name": "새 대회", "start": "2027-01-01", "end": "2027-01-31"},
+                                  {"action": "add_player", "github": "../x"},
+                                  {"action": "remove_player", "github": "owner-kim"}], title="[관리] 넣기")
+c2 = json.loads((tmp / "config.json").read_text(encoding="utf-8"))
+check("주인의 관리 명령: 참가자를 넣으면 계좌가 바로 열리고, 대회 기간이 설정에 적힌다", "명단에 넣었습니다" in r and ledger("carol")[0]["type"] == "open"
+      and {"github": "Carol", "name": "캐럴", "agent": "새 에이전트"} in c2["players"]
+      and {"name": "새 대회", "start": "2027-01-01", "end": "2027-01-31"} in c2["league"]["contests"], r)
+check("이상한 계정 이름과 주인 계좌 빼기는 하지 않는다", r.count("하지 않았습니다") == 2 and any(p.get("main") for p in c2["players"]), r)
+r = issue(MON, "carol", 32, {"symbol": "000010", "side": "buy", "qty": 1, "type": "moc"})
+check("새로 들어온 참가자가 바로 주문할 수 있다", "주문 번호 O0001" in r, r)
+r = issue(MON, "Owner-Kim", 33, [{"action": "remove_player", "github": "carol"}, {"action": "remove_contest", "name": "새 대회"}], title="[관리] 빼기")
+c3 = json.loads((tmp / "config.json").read_text(encoding="utf-8"))
+check("참가자를 빼면 명단에서 빠지고 장부는 남는다", "명단에서 뺐습니다" in r and not any(str(p.get("github")).lower() == "carol" for p in c3["players"])
+      and len(ledger("carol")) == 2 and not any(c["name"] == "새 대회" for c in c3["league"]["contests"]), r)
+r = issue(MON, "carol", 34, {"symbol": "000010", "side": "buy", "qty": 1})
+check("빠진 사람의 주문은 받지 않는다", "명단에 없어" in r and len(ledger("carol")) == 2, r)
 
 # 체결과 순위
 WED = "2026-11-05T09:00:00+09:00"

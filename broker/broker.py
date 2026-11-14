@@ -13,7 +13,9 @@
   주인 계좌("main": true)는 예전 자리 그대로: ledger/ledger.jsonl, docs/data/state.json, 주문 창구 inbox/.
   다른 참가자는 accounts/{계정}/ledger.jsonl, docs/data/accounts/{계정}.json. 주문은 본인 GitHub 계정으로 연 "주문 이슈"로만 받는다
   (python broker/broker.py issue — 자동 실행 issue-window 가 부른다. 이슈를 쓴 계정이 곧 계좌다. 요청 안의 계좌 이름은 보지 않는다).
-  시세(data/)는 모두가 함께 쓴다. 순위표는 docs/data/league.json.
+  로그인이 있는 화면에서 들어오는 주문은 inbox/{계정}/ 에 요청 파일로 떨어진다 — 그 폴더 이름이 곧 계좌다 (폴더에 쓰는 쪽이 본인 확인을 책임진다).
+  주인은 "[관리]" 이슈로 참가자를 넣고 빼고 대회 기간을 정한다 (주인 계정이 연 이슈만 받는다. config.json 을 고친다).
+  시세(data/)는 모두가 함께 쓴다. 전체 계좌 수익률은 docs/data/league.json (관리자 화면 docs/admin.html).
   한 계좌만 다루려면 명령 앞에 --account 계정 (없으면 주인 계좌). update·settle·build·daily·verify 는 모든 계좌를 돈다.
 
 장부는 계좌마다 한 파일이다 (주인 계좌는 {HOME}/ledger/ledger.jsonl). 줄 추가만 하고, 줄마다 앞줄의 지문(hash)을 품는다.
@@ -1162,22 +1164,42 @@ def handle_request(req, cid):
 
 
 def cmd_ingest(a):
-    """주문 창구(주인 계좌): inbox/ 의 요청 파일을 이름 순서대로 접수한다. 받은 것도 안 받은 것도 장부에 남기고 파일은 치운다.
+    """주문 창구: inbox/ 의 요청 파일을 이름 순서대로 접수한다. 받은 것도 안 받은 것도 장부에 남기고 파일은 치운다.
+    inbox/*.json 은 주인 계좌, inbox/{계정}/*.json 은 그 참가자 계좌 (명단에 없는 폴더는 건드리지 않고 알리기만 한다).
     요청 파일(JSON): {"client_id": "...", "action": "order"|"cancel", ...주문 내용 또는 "order": "O0001", "why": "..."}"""
     inbox = HOME / "inbox"
-    files = sorted(f for f in inbox.glob("*.json")) if inbox.exists() else []
+    here = ACCT
+    accts = {x["id"]: x for x in accounts()}
+    boxes = [(next(x for x in accts.values() if x["main"]), inbox)]
+    if inbox.exists():
+        for d in sorted(x for x in inbox.iterdir() if x.is_dir()):
+            if d.name.lower() in accts:
+                boxes.append((accts[d.name.lower()], d))
+            elif any(d.glob("*.json")):
+                print(f"  명단에 없는 계좌의 창구라 받지 않습니다: {d.name}")
     n_ok = n_no = 0
-    for f in files:
-        try:
-            req = json.loads(f.read_text(encoding="utf-8"))
-            cid = str(req.get("client_id") or f.stem)
-        except Exception:
-            req, cid = {}, f.stem
-        res, msg = handle_request(req, cid)
-        if res != "dup":                                  # 이미 처리한 요청(같은 파일이 다시 올라왔다)은 조용히 치운다
-            print(f"  {cid} — {msg}")
-            n_ok, n_no = n_ok + (res == "ok"), n_no + (res == "no")
-        f.unlink()
+    opened = False
+    for acct, box in boxes:
+        files = sorted(box.glob("*.json")) if box.exists() else []
+        if files and not acct["main"] and not opened:
+            open_missing()
+            opened = True
+        use(acct)
+        for f in files:
+            try:
+                req = json.loads(f.read_text(encoding="utf-8"))
+                cid = str(req.get("client_id") or f.stem)[:60]
+                if not isinstance(req, dict):
+                    raise ValueError
+            except Exception:
+                req, cid = {}, f.stem[:60]
+            req.pop("account", None)
+            res, msg = handle_request(req, cid)
+            if res != "dup":                              # 이미 처리한 요청(같은 파일이 다시 올라왔다)은 조용히 치운다
+                print(f"  [{acct['id']}] {cid} — {msg}")
+                n_ok, n_no = n_ok + (res == "ok"), n_no + (res == "no")
+            f.unlink()
+    use(here)
     print(f"주문 창구: 접수 {n_ok}건, 받지 않음 {n_no}건")
 
 
@@ -1195,11 +1217,110 @@ def parse_issue(body):
     return reqs
 
 
+def owner_login(cfg):
+    """거래소 주인의 GitHub 계정: 설정에 적힌 것 → 주인 계좌의 계정 → 저장소 주인."""
+    return ((cfg.get("league") or {}).get("owner")
+            or next((p.get("github") for p in cfg.get("players") or [] if p.get("main")), None)
+            or os.environ.get("GITHUB_REPOSITORY_OWNER") or "")
+
+
+def _save_config(cfg):
+    (HOME / "config.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _day(v):
+    return datetime.strptime(str(v), "%Y-%m-%d").strftime("%Y-%m-%d")
+
+
+def admin_do(cfg, req):
+    """관리 명령 하나를 설정에 적용한다. 반환: 사람 말. 안 되면 Refused."""
+    act = req.get("action")
+    players = cfg.setdefault("players", [])
+    league = cfg.setdefault("league", {})
+    if act in ("add_player", "remove_player"):
+        gh = str(req.get("github") or "").strip().lstrip("@")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}", gh):
+            raise Refused("GitHub 계정 이름이 올바르지 않습니다")
+        cur = next((p for p in players if str(p.get("github", "")).lower() == gh.lower()), None)
+        if act == "add_player":
+            name = str(req.get("name") or gh).strip()[:40]
+            agent = str(req.get("agent") or "").strip()[:60] or None
+            if cur:                                       # 이미 있으면 이름·에이전트만 고친다
+                cur["name"] = name
+                if agent:
+                    cur["agent"] = agent
+                return f"`{gh}` 의 이름을 '{name}'(으)로 고쳤습니다"
+            players.append({k: v for k, v in (("github", gh), ("name", name), ("agent", agent)) if v})
+            return f"`{gh}` 을(를) '{name}'(으)로 명단에 넣었습니다. 계좌가 시작 금액 {cfg['initial_cash']:,}원으로 열립니다"
+        if not cur:
+            raise Refused(f"`{gh}` 은(는) 명단에 없습니다")
+        if cur.get("main"):
+            raise Refused("주인 계좌는 뺄 수 없습니다")
+        players.remove(cur)
+        return f"`{gh}` 을(를) 명단에서 뺐습니다. 장부는 그대로 남고, 더 이상 주문을 받지 않으며 전체 수익률 표에서 빠집니다"
+    if act in ("add_contest", "remove_contest"):
+        name = str(req.get("name") or "").strip()[:40]
+        if not name:
+            raise Refused("대회 이름이 필요합니다")
+        cs = league.setdefault("contests", [])
+        cur = next((c for c in cs if c.get("name") == name), None)
+        if act == "remove_contest":
+            if not cur:
+                raise Refused(f"'{name}' 대회가 없습니다")
+            cs.remove(cur)
+            return f"'{name}' 대회를 뺐습니다"
+        try:
+            start = _day(req.get("start"))
+            end = _day(req["end"]) if req.get("end") else None
+        except Exception:
+            raise Refused("날짜는 2026-12-01 처럼 적습니다")
+        if end and end < start:
+            raise Refused("끝 날이 시작 날보다 앞섭니다")
+        new = {"name": name, "start": start, "end": end}
+        if cur:
+            cur.update(new)
+        else:
+            cs.append(new)
+        return f"'{name}' 대회를 {start} ~ {end or '끝 없음'} 으로 정했습니다"
+    raise Refused("모르는 관리 명령입니다 (add_player · remove_player · add_contest · remove_contest)")
+
+
+def cmd_admin_issue(author, body):
+    """관리 이슈: 주인 계정이 연 것만 받는다. 설정(config.json)을 고치고, 새 참가자의 계좌를 바로 연다."""
+    cfg = config()
+    owner = owner_login(cfg)
+    if not owner or author.lower() != owner.lower():
+        return [f"관리 명령은 거래소 주인만 낼 수 있습니다. `{author}` 계정의 요청은 받지 않았습니다."]
+    try:
+        reqs = parse_issue(body)
+    except Exception:
+        return ["관리 명령을 읽을 수 없습니다. 예: `{\"action\": \"add_player\", \"github\": \"계정\", \"name\": \"화면에 나올 이름\"}`"]
+    lines, changed = [], False
+    for req in reqs:
+        try:
+            lines.append(f"- {admin_do(cfg, req)}")
+            changed = True
+        except Refused as e:
+            lines.append(f"- 하지 않았습니다 — {e}")
+    if changed:
+        _save_config(cfg)
+        open_missing()
+    roster = ", ".join(f"{x['name']}(`{x['github'] or '주인'}`)" for x in accounts())
+    return lines + ["", f"지금 명단: {roster}"]
+
+
 def cmd_issue(a):
-    """주문 이슈 하나를 접수한다. 이슈를 쓴 GitHub 계정이 곧 계좌다 — 요청 안에 적힌 계좌는 보지 않는다.
+    """이슈 하나를 처리한다. 제목이 "[관리]" 로 시작하면 관리 명령(주인만), 아니면 주문.
+    주문 이슈 하나를 접수한다. 이슈를 쓴 GitHub 계정이 곧 계좌다 — 요청 안에 적힌 계좌는 보지 않는다.
     환경변수: PAPER_ISSUE_AUTHOR, PAPER_ISSUE_NUMBER, PAPER_ISSUE_BODY, PAPER_ISSUE_AT(이슈를 연 시각), PAPER_REPLY(답글을 적을 파일)."""
     author = os.environ.get("PAPER_ISSUE_AUTHOR", "").strip()
     num = re.sub(r"\D", "", os.environ.get("PAPER_ISSUE_NUMBER", "")) or "0"
+    if os.environ.get("PAPER_ISSUE_TITLE", "").strip().startswith("[관리]"):
+        text = "\n".join(cmd_admin_issue(author, os.environ.get("PAPER_ISSUE_BODY", "")))
+        print(text)
+        if os.environ.get("PAPER_REPLY"):
+            Path(os.environ["PAPER_REPLY"]).write_text(text + "\n", encoding="utf-8")
+        return
     acct = next((x for x in accounts() if x["github"] and x["github"].lower() == author.lower()), None)
     lines = []
     if not acct:
