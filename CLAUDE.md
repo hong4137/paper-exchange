@@ -32,8 +32,8 @@
   - `premarket.yml`(kr-premarket) — 평일 07:55: 한국 장전 시세 모으기 (`broker/live.py`). 한국 종목이 없으면 바로 끝난다
   - `probe.yml` — `broker/`·`tests/` 가 바뀔 때: 시험과 시세 원천 확인
   - 장부에 쓰는 실행은 `concurrency: ledger` 로 한 번에 하나만 돈다. 올리기는 `.github/commit.sh`.
-  - `exchange`·`order-window` 는 `main` 에 올린 것으로만 돈다(`issue-window` 는 이슈로 돌고 언제나 `main` 의 코드를 쓴다)
-  ·(작업 가지에서는 돌지 않는다 — 가지에 자료가 쌓이면 합칠 때 부딪힌다). `probe` 는 어느 가지에서나 돈다.
+  - `exchange`·`order-window` 는 `main` 에 올린 것으로만 돈다(작업 가지에서는 돌지 않는다 — 가지에 자료가 쌓이면 합칠 때 부딪힌다). `probe` 는 어느 가지에서나 돈다.
+    `issue-window` 는 이슈가 열릴 때 돌고 언제나 `main` 의 코드를 쓴다.
 - 코드를 고친 뒤에는 시험(임시 폴더)만 이 PC 에서 돌리고, 올리면 클라우드가 실제 장부로 돈다. **올리기 전에 `git pull --rebase`** — 클라우드가 그사이 자료를 올렸을 수 있다.
 - GitHub 예약 실행은 늦게 시작될 수 있다. 1분 시세가 8일치뿐이므로 정기 실행이 며칠 멈추면 그 사이 체결은 하루 시세로 어림된다.
 
