@@ -2,8 +2,10 @@
 //
 // 하는 일
 //   1. 로그인 확인: sharktalk 인증 워커(sharktalk-auth)의 /me 에 쿠키를 넘겨 묻는다 (service binding AUTH_SVC).
-//      ★ /me 가 돌려주는 모양은 이 저장소에서 볼 수 없었다. identityFromMe() 한 곳에서 여러 모양을 받아 주게 해 두었으니,
-//        PC 에서 sharktalk-auth 의 실제 응답과 견줘 보고 다르면 그 함수만 고친다 (운영-안내.md 2번).
+//      2026-11-15 sharktalk-auth/index.js 의 실제 코드와 견줘 맞췄다:
+//        로그인 쿠키 st_session (Domain=.sharktalk.co.kr — exchange. 에도 온다), 로그인 안 됨 = 401 {authenticated:false},
+//        로그인 됨 = 200 {authenticated:true, user:{email,name,role}}. sharktalk 의 "아이디"는 이메일 하나뿐이다.
+//        로그인 화면은 https://auth.sharktalk.co.kr/login?next=돌아올주소 (sharktalk 주소만 받는다).
 //      AUTH_SVC 가 없고 ACCESS_TEAM·ACCESS_AUD 가 있으면 Cloudflare Access 토큰으로 확인한다 (sharktalk 밖에 올릴 때의 대안).
 //   2. 누구인지: 로그인한 사람(이메일 또는 sharktalk 아이디) → 참가자 (저장소 config.json players[] 의 email 또는 login).
 //      관리자는 비밀 설정 ADMIN_EMAILS (이메일이나 아이디, 쉼표로 여럿).
@@ -41,27 +43,23 @@ async function accessKeys(env, fetchFn) {
 export function _resetCaches() { certCache = { at: 0, keys: null }; cfgCache = { at: 0, cfg: null }; }
 
 /** sharktalk-auth 의 /me 응답에서 "누구인가"를 꺼낸다. 로그인하지 않았으면 null.
- *  받아 주는 모양: { email, id|login|username|sub } 가 바로 있거나 user·me·data 안에 있는 것.
- *  ok·authenticated·loggedIn·logged_in 이 false 면 로그인하지 않은 것으로 본다. */
+ *  실제 모양 하나만 받는다: { authenticated: true, user: { email, name, role } }.
+ *  authenticated 가 정확히 true 가 아니거나 user.email 이 이메일이 아니면 로그인하지 않은 것으로 본다. */
 export function identityFromMe(j) {
-  if (!j || typeof j !== 'object') return null;
-  for (const k of ['ok', 'authenticated', 'loggedIn', 'logged_in']) if (j[k] === false) return null;
-  const u = [j.user, j.me, j.data, j].find((x) => x && typeof x === 'object' && (x.email || x.id || x.login || x.username || x.sub));
-  if (!u) return null;
-  const email = typeof u.email === 'string' && u.email.includes('@') ? u.email.toLowerCase() : null;
-  const raw = u.login ?? u.username ?? u.id ?? u.sub;
-  const login = raw === undefined || raw === null ? null : String(raw).toLowerCase();
-  return email || login ? { email, login } : null;
+  if (!j || typeof j !== 'object' || j.authenticated !== true) return null;
+  const u = j.user;
+  if (!u || typeof u !== 'object' || typeof u.email !== 'string' || !u.email.includes('@')) return null;
+  return { email: u.email.trim().toLowerCase(), login: null };
 }
 
 /** sharktalk 로그인 확인: 인증 워커의 /me 에 쿠키를 넘겨 묻는다. 맞으면 { email, login }, 아니면 null. */
 export async function verifySharktalk(request, env) {
-  const cookie = request.headers.get('Cookie');
-  if (!cookie || !env.AUTH_SVC) return null;
+  const cookie = request.headers.get('Cookie') || '';
+  if (!/(?:^|;\s*)st_session=[^;]/.test(cookie) || !env.AUTH_SVC) return null;
   try {
     const r = await env.AUTH_SVC.fetch(new Request(env.AUTH_ME_URL || 'https://auth.sharktalk.co.kr/me',
       { headers: { cookie, accept: 'application/json' } }));
-    if (!r.ok) return null;
+    if (r.status !== 200) return null;
     return identityFromMe(await r.json());
   } catch (e) {
     return null;
@@ -215,7 +213,10 @@ export async function handle(request, env, next, fetchFn = fetch) {
   const api = path.startsWith('/api/') || path.startsWith('/data/');
   const who = env.AUTH_SVC ? await verifySharktalk(request, env) : await verifyAccess(request, env, fetchFn);
   if (!who) {
-    const login = /^https:\/\//.test(env.LOGIN_URL || '') ? ` <a style="color:#f2c14e" href="${env.LOGIN_URL}">로그인하러 가기</a>` : '';
+    // 로그인 화면에 돌아올 주소를 실어 보낸다 (sharktalk-auth 가 ?next= 로 받는다)
+    const back = encodeURIComponent(url.origin + url.pathname);
+    const login = /^https:\/\/[a-z0-9.-]+\/[a-z0-9\/._-]*$/i.test(env.LOGIN_URL || '')
+      ? ` <a style="color:#f2c14e" href="${env.LOGIN_URL}?next=${back}">로그인하러 가기</a>` : '';
     return api ? json({ error: '로그인이 필요합니다' }, 401) : deny(401, `로그인이 필요합니다.${login}<br>로그인한 뒤 이 주소를 다시 열어 주세요.`);
   }
   let cfg;
@@ -259,5 +260,10 @@ export async function handle(request, env, next, fetchFn = fetch) {
 
   if (path.startsWith('/api/')) return json({ error: '없는 주소입니다' }, 404);
   if ((path === '/admin.html' || path === '/admin') && !me.admin) return deny(403, '관리자만 볼 수 있는 화면입니다.');
-  return next();
+  // 로그인한 사람에게만 나가는 화면이다 — 중간 캐시에 남기지 않고 검색에 걸리지 않게 (sharktalk 공용 문지기와 같은 머리말)
+  const res = await next();
+  const headers = new Headers(res.headers);
+  headers.set('cache-control', 'private, no-store');
+  headers.set('x-robots-tag', 'noindex, nofollow');
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
 }

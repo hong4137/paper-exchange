@@ -122,29 +122,43 @@ r = await call('/api/admin', 'boss@example.com', { method: 'POST', body: { actio
 check('참가자를 sharktalk 아이디로도 넣을 수 있다', r.status === 200 && JSON.parse(calls.find((c) => c.init.method === 'POST').init.body).body.includes('"login":"dan-st"'));
 
 console.log('sharktalk 로그인 (인증 워커의 /me 에 쿠키를 넘겨 묻는다)');
-const sessions = { 'st=boss': { ok: true, user: { email: 'Boss@Example.com', id: 1 } }, 'st=alice': { email: 'alice@example.com' },
-                   'st=carl': { user: { username: 'Carl' } }, 'st=out': { ok: false, user: { email: 'boss@example.com' } } };
+// 실제 sharktalk-auth 의 /me: 로그인 됨 = 200 { authenticated: true, user: { email, name, role } }, 안 됨 = 401 { authenticated: false }
+const sessions = { 'st_session=boss': { authenticated: true, user: { email: 'Boss@Example.com', name: '주인', role: 'admin' } },
+                   'st_session=alice': { authenticated: true, user: { email: 'alice@example.com', name: '앨리스', role: 'editor' } },
+                   'st_session=out': { authenticated: false, user: { email: 'boss@example.com' } },
+                   'st_session=bare': { email: 'boss@example.com' },
+                   'other=boss': { authenticated: true, user: { email: 'boss@example.com' } } };
 let asked = [];
-const stEnv = { GITHUB_REPO: 'owner/repo', GITHUB_TOKEN: 'tok', ADMIN_EMAILS: 'boss@example.com', LOGIN_URL: 'https://sharktalk.co.kr/',
-  AUTH_SVC: { fetch: async (req) => { asked.push(req.url); const s = sessions[req.headers.get('cookie')]; return s ? Response.json(s) : new Response('', { status: 401 }); } } };
+const stEnv = { GITHUB_REPO: 'owner/repo', GITHUB_TOKEN: 'tok', ADMIN_EMAILS: 'boss@example.com', LOGIN_URL: 'https://auth.sharktalk.co.kr/login',
+  AUTH_SVC: { fetch: async (req) => { asked.push(req.url); const s = sessions[req.headers.get('cookie')]; return s ? Response.json(s) : Response.json({ authenticated: false }, { status: 401 }); } } };
 files['config.json'] = { players: [...config.players, { id: 'carl', name: '칼', login: 'carl' }] };
 _resetCaches();
 const st = async (path, cookie, init = {}) => {
   const res = await handle(new Request(site + path, { ...init, headers: { ...(cookie ? { Cookie: cookie } : {}), ...(init.headers || {}) } }), stEnv, async () => new Response('화면'), fetchFn);
   const text = await res.text(); let data; try { data = JSON.parse(text); } catch (e) { data = text; }
-  return { status: res.status, data };
+  return { status: res.status, data, headers: res.headers };
 };
-r = await st('/api/me', 'st=boss');
+r = await st('/api/me', 'st_session=boss');
 check('sharktalk 에 로그인한 관리자를 알아본다', r.status === 200 && r.data.admin === true && r.data.id === 'boss' && asked.at(-1) === 'https://auth.sharktalk.co.kr/me', JSON.stringify(r.data));
-check('sharktalk 에 로그인한 참가자는 자기 계좌만', (await st('/data/accounts/alice.json', 'st=alice')).status === 200 && (await st('/data/league.json', 'st=alice')).status === 403);
-check('이메일 없이 sharktalk 아이디만 오는 경우도 명단의 아이디와 맞춘다', (await st('/api/me', 'st=carl')).data.id === 'carl');
-r = await st('/', null);
-check('쿠키가 없으면 들이지 않고 로그인하러 갈 곳을 알려 준다', r.status === 401 && String(r.data).includes('https://sharktalk.co.kr/'), String(r.data).slice(0, 80));
-check('인증 워커가 모르는 쿠키·로그인 안 됨 응답은 들이지 않는다', (await st('/api/me', 'st=nobody')).status === 401 && (await st('/api/me', 'st=out')).status === 401);
+check('sharktalk 에 로그인한 참가자는 자기 계좌만', (await st('/data/accounts/alice.json', 'st_session=alice')).status === 200 && (await st('/data/league.json', 'st_session=alice')).status === 403);
+r = await st('/admin.html', null);
+check('쿠키가 없으면 들이지 않고, 로그인 화면에 돌아올 주소를 실어 알려 준다', r.status === 401 && !String(r.data).includes('화면')
+      && String(r.data).includes('https://auth.sharktalk.co.kr/login?next=' + encodeURIComponent(site + '/admin.html')), String(r.data).slice(-200));
+let n0 = asked.length;
+check('st_session 쿠키가 없으면 인증 워커에 묻지도 않는다', (await st('/api/me', 'other=boss')).status === 401 && asked.length === n0);
+check('인증 워커가 모르는 쿠키·로그인 안 됨 응답은 들이지 않는다', (await st('/api/me', 'st_session=nobody')).status === 401 && (await st('/api/me', 'st_session=out')).status === 401);
+check('authenticated 표시가 없는 응답은 로그인으로 보지 않는다', (await st('/api/me', 'st_session=bare')).status === 401);
+for (const p of ['/', '/admin.html', '/data/league.json', '/data/state.json', '/data/accounts/alice.json', '/api/me'])
+  check('로그인 없이 막힘 ' + p, (await st(p, null)).status === 401);
+r = await st('/', 'st_session=alice');
+check('통과한 화면은 캐시에 남기지 않는다', r.status === 200 && r.data === '화면' && r.headers.get('cache-control') === 'private, no-store' && r.headers.get('x-robots-tag') === 'noindex, nofollow');
+check('참가자에게 관리자 화면은 나가지 않는다', (await st('/admin.html', 'st_session=alice')).status === 403 && (await st('/admin.html', 'st_session=boss')).status === 200);
 check('sharktalk 로그인일 때는 Access 토큰을 들고 와도 소용없다', (await handle(new Request(site + '/api/me', { headers: { 'Cf-Access-Jwt-Assertion': await token('boss@example.com') } }),
       { ...stEnv, ACCESS_TEAM: env.ACCESS_TEAM, ACCESS_AUD: env.ACCESS_AUD }, async () => new Response('화면'), fetchFn)).status === 401);
-check('/me 응답 모양 여러 가지', identityFromMe({ user: { email: 'A@b.c' } }).email === 'a@b.c' && identityFromMe({ data: { login: 'Kim' } }).login === 'kim'
-      && identityFromMe({ sub: 42 }).login === '42' && identityFromMe({ authenticated: false, email: 'a@b.c' }) === null && identityFromMe({}) === null && identityFromMe(null) === null);
+check('/me 응답은 실제 모양 하나만 받는다', identityFromMe({ authenticated: true, user: { email: 'A@b.c', name: 'x', role: 'admin' } }).email === 'a@b.c'
+      && identityFromMe({ user: { email: 'a@b.c' } }) === null && identityFromMe({ authenticated: 'yes', user: { email: 'a@b.c' } }) === null
+      && identityFromMe({ authenticated: true, user: { email: 'not-an-email' } }) === null && identityFromMe({ authenticated: true, email: 'a@b.c' }) === null
+      && identityFromMe({ authenticated: false, user: { email: 'a@b.c' } }) === null && identityFromMe({}) === null && identityFromMe(null) === null);
 
 console.log(`\n${fails.length ? '실패 ' + fails.length + '건' : '전부 통과'}`);
 process.exit(fails.length ? 1 : 0);
