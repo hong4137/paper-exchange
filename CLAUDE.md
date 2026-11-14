@@ -121,7 +121,7 @@ inbox/                주문 창구 — 운용자가 올린 주문 요청 파일
   루트 `sharktalk.co.kr` 은 포털(`sharktalk-portal`), 로그인은 **`sharktalk-auth`(`auth.sharktalk.co.kr`)** — 다른 워커는 service binding `AUTH_SVC` 로 `/me` 에 쿠키를 넘겨 묻는다(비밀값을 나눠 갖지 않는다).
   GitHub 저장소가 만든 자료를 내 도메인으로 내보내는 `sharktalk-mirror`(news·must·signal·map·ndx)도 있다. 그 밖에 cio·read·kid·books·shape·when·sisa·baduk 등.
   관례: 올리기 전 `wrangler whoami` 로 개인 계정 확인, 다른 서비스에 영향이 있으면 올리지 않는다, 비밀값은 사용자가 `wrangler secret put` 으로, 프로젝트마다 `RESUME.md`.
-- **그래서 거래소 화면은**: 워커 `sharktalk-exchange`, 주소 `exchange.sharktalk.co.kr`(내가 임시로 정한 이름 — `wrangler.jsonc` 의 `pattern`), 화면 파일은 `docs/`, 로그인은 `sharktalk-auth`.
+- **그래서 거래소 화면은**: 워커 `sharktalk-exchange`, 주소 `exchange.sharktalk.co.kr`(사용자 확정 2026-11-14 — `wrangler.jsonc` 의 `pattern`), 화면 파일은 `docs/`, 로그인은 `sharktalk-auth`.
   모든 요청이 먼저 문지기 `site/worker.mjs` → `site/lib.mjs` 를 지난다(`run_worker_first`). 자료 폴더(`docs/data`)는 올리지 않고(`docs/.assetsignore`) 문지기가 저장소에서 읽어 준다.
   거래소(GitHub 자동 실행·장부)는 그대로다. 로그인이 없는 GitHub Pages 에서도 화면은 예전처럼 돈다(`api/me` 가 없으면 양식이 안 나올 뿐).
 - **문지기가 하는 일**(`site/lib.mjs`):
