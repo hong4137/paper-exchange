@@ -1,0 +1,27 @@
+name: probe
+# 시세 원천이 GitHub 쪽에서 열리는지, 시험이 통과하는지 확인한다. 장부는 건드리지 않는다.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'broker/**'
+      - 'tests/**'
+      - '.github/workflows/probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 시험 (가짜 시세)
+        run: |
+          python tests/test_broker.py
+          python tests/test_intraday.py
+      - name: 시세 원천 열리는지
+        run: python tests/probe_sources.py
