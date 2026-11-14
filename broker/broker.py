@@ -9,7 +9,16 @@
 장부 줄 종류: open · order · cancel · fill · reject · expire · refuse · fx(환전) · dividend(배당) · split(분할·병합).
   옛 fill 줄(ccy·delta 가 없는 것)은 원화 한 주머니 시절 것으로 읽는다.
 
-장부는 {HOME}/ledger/ledger.jsonl 한 파일이다. 줄 추가만 하고, 줄마다 앞줄의 지문(hash)을 품는다.
+참가자가 여럿이다 (config.json "players" — 주인이 넣은 GitHub 계정 명단). 계좌는 참가자마다 하나, 장부도 계좌마다 하나다.
+  주인 계좌("main": true)는 예전 자리 그대로: ledger/ledger.jsonl, docs/data/state.json, 주문 창구 inbox/.
+  다른 참가자는 accounts/{계정}/ledger.jsonl, docs/data/accounts/{계정}.json. 주문은 본인 GitHub 계정으로 연 "주문 이슈"로만 받는다
+  (python broker/broker.py issue — 자동 실행 issue-window 가 부른다. 이슈를 쓴 계정이 곧 계좌다. 요청 안의 계좌 이름은 보지 않는다).
+  로그인이 있는 화면에서 들어오는 주문은 inbox/{계정}/ 에 요청 파일로 떨어진다 — 그 폴더 이름이 곧 계좌다 (폴더에 쓰는 쪽이 본인 확인을 책임진다).
+  주인은 "[관리]" 이슈로 참가자를 넣고 빼고 대회 기간을 정한다 (주인 계정이 연 이슈만 받는다. config.json 을 고친다).
+  시세(data/)는 모두가 함께 쓴다. 전체 계좌 수익률은 docs/data/league.json (관리자 화면 docs/admin.html).
+  한 계좌만 다루려면 명령 앞에 --account 계정 (없으면 주인 계좌). update·settle·build·daily·verify 는 모든 계좌를 돈다.
+
+장부는 계좌마다 한 파일이다 (주인 계좌는 {HOME}/ledger/ledger.jsonl). 줄 추가만 하고, 줄마다 앞줄의 지문(hash)을 품는다.
 상태(현금·보유·주문 상태)는 장부를 처음부터 다시 읽어 만든다.
 
 쓰는 법 (통합 개발/모의투자 에서):
@@ -35,6 +44,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -47,6 +57,8 @@ KST = px.KST
 HOME = Path(os.environ.get("PAPER_HOME") or Path(__file__).resolve().parent.parent)
 LEDGER = HOME / "ledger" / "ledger.jsonl"
 STATE_OUT = HOME / "docs" / "data" / "state.json"
+LEAGUE_OUT = HOME / "docs" / "data" / "league.json"
+ACCT = {"id": "main", "github": None, "name": None, "agent": None, "main": True}     # 지금 다루는 계좌
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -59,6 +71,185 @@ def now():
 
 def config():
     return json.loads((HOME / "config.json").read_text(encoding="utf-8"))
+
+
+# ---------- 계좌 (참가자) ----------
+def accounts(cfg=None):
+    """참가자 계좌 목록. 명단(players)이 없으면 주인 계좌 하나.
+    계좌 이름표(id)는 명단의 id, 없으면 GitHub 계정 이름(소문자). 파일 이름이 되므로 영문·숫자·줄표만 받는다.
+    GitHub 계정이 없는 참가자(이메일로 로그인하는 사람)는 id 만 있어도 된다 — 주문 이슈는 못 쓰고 로그인한 화면으로 주문한다."""
+    cfg = cfg or config()
+    out = []
+    for p in cfg.get("players") or []:
+        gh = str(p.get("github") or "").strip() or None
+        aid = str(p.get("id") or gh or "").strip().lower()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,38}", aid) or any(x["id"] == aid for x in out):
+            continue
+        out.append({"id": aid, "github": gh, "name": str(p.get("name") or gh or aid), "agent": p.get("agent"),
+                    "main": bool(p.get("main")) and not any(x["main"] for x in out)})
+    if not any(x["main"] for x in out):                 # 예전 장부(주인 계좌)는 언제나 남는다
+        out.insert(0, {"id": "main", "github": None, "name": cfg["account_name"], "agent": None, "main": True})
+    return out
+
+
+def use(acct):
+    """이제부터 이 계좌의 장부·화면 자료를 다룬다."""
+    global LEDGER, STATE_OUT, ACCT
+    ACCT = acct
+    if acct["main"]:
+        LEDGER, STATE_OUT = HOME / "ledger" / "ledger.jsonl", HOME / "docs" / "data" / "state.json"
+    else:
+        LEDGER = HOME / "accounts" / acct["id"] / "ledger.jsonl"
+        STATE_OUT = HOME / "docs" / "data" / "accounts" / f"{acct['id']}.json"
+
+
+def account_label(cfg):
+    return cfg["account_name"] if ACCT["main"] else ACCT["name"]
+
+
+def pick(account_id):
+    """--account 로 고른 계좌 (없으면 주인 계좌)."""
+    accts = accounts()
+    if not account_id:
+        return next(x for x in accts if x["main"])
+    a = next((x for x in accts if x["id"] == str(account_id).lower()), None)
+    if not a:
+        sys.exit(f"명단에 없는 계좌입니다: {account_id}")
+    return a
+
+
+def open_missing():
+    """명단에 있는데 아직 장부가 없는 참가자의 계좌를 연다 (모두 같은 시작 금액·규칙)."""
+    cfg, here = config(), ACCT
+    for acct in accounts(cfg):
+        use(acct)
+        if not read_ledger():
+            append("open", {"account": account_label(cfg), "player": acct["github"], "initial_cash": cfg["initial_cash"],
+                            "opened": now().date().isoformat(), "fees": fee_cfg(cfg), "rules": cfg["rules"]})
+            print(f"계좌 개설: {account_label(cfg)} · {cfg['initial_cash']:,}원")
+    use(here)
+
+
+# ---------- 수익률 재기 ----------
+# 넣고 빼는 돈이 없으므로 기간 수익률 = 끝 날의 총자산 ÷ 시작 전날의 총자산 − 1. 자산 곡선(하루 한 점)에서 바로 나온다.
+PERIODS = [("w1", "최근 1주", 7), ("m1", "최근 1개월", 30), ("m3", "최근 3개월", 91), ("m6", "최근 6개월", 182), ("y1", "최근 1년", 365)]
+
+
+def _point_before(equity, date, inclusive=True):
+    """date 이하(또는 미만)의 마지막 자산 곡선 점."""
+    best = None
+    for e in equity:
+        if e["d"] < date or (inclusive and e["d"] == date):
+            best = e
+        else:
+            break
+    return best
+
+
+def span_return(equity, initial, start, end=None):
+    """start 날부터 end 날까지의 수익률. 기준은 start 전날의 총자산 — 계좌를 start 뒤에 열었으면 시작 금액(늦게 들어온 것으로 표시).
+    반환 {from, to, pct, bench_pct, excess_pct, from_open(시작 금액 기준인가), late(start 뒤에 연 계좌인가)} 또는 None(그 기간에 자료가 없다)."""
+    if not equity:
+        return None
+    last = _point_before(equity, end) if end else equity[-1]
+    if last is None or last["d"] < start:
+        return None
+    base = _point_before(equity, start, inclusive=False)
+    from_open = base is None
+    b_total, b_bench = (initial, initial) if from_open else (base["total"], base["bench"])
+    pct = round((last["total"] / b_total - 1) * 100, 2) if b_total else None
+    bench = round((last["bench"] / b_bench - 1) * 100, 2) if last.get("bench") and b_bench else None
+    return {"from": equity[0]["d"] if from_open else start, "to": last["d"], "pct": pct, "bench_pct": bench,
+            "excess_pct": None if pct is None or bench is None else round(pct - bench, 2),
+            "from_open": from_open, "late": equity[0]["d"] > start}
+
+
+def performance(equity, initial):
+    """계좌 하나의 성적: 기간별 수익률(비교 기준과 나란히), 최대 낙폭, 하루 수익률의 흔들림."""
+    if not equity:
+        return None
+    last_d = datetime.strptime(equity[-1]["d"], "%Y-%m-%d")
+    out = []
+    for key, label, days in PERIODS:
+        start = (last_d - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+        r = span_return(equity, initial, start)
+        if r and not r["from_open"]:                    # 계좌가 그 기간보다 젊으면 비워 둔다
+            out.append({"key": key, "label": label, **r})
+    r = span_return(equity, initial, f"{last_d.year}-01-01")
+    if r:
+        out.append({"key": "ytd", "label": "올해", **r})
+    r = span_return(equity, initial, equity[0]["d"])
+    out.append({"key": "all", "label": "처음부터", **r})
+    # 최대 낙폭: 지나온 가장 높은 총자산에서 가장 많이 내려간 폭
+    peak, peak_d, mdd = initial, equity[0]["d"], {"pct": 0.0, "from": None, "to": None}
+    rets, prev = [], initial
+    for e in equity:
+        if e["total"] > peak:
+            peak, peak_d = e["total"], e["d"]
+        dd = (e["total"] / peak - 1) * 100 if peak else 0
+        if dd < mdd["pct"]:
+            mdd = {"pct": round(dd, 2), "from": peak_d, "to": e["d"]}
+        if prev:
+            rets.append(e["total"] / prev - 1)
+        prev = e["total"]
+    rets = rets[1:]                                     # 첫 점은 시작 금액과의 차이라 하루 수익률이 아니다
+    vol = None
+    if len(rets) >= 5:
+        m = sum(rets) / len(rets)
+        vol = round(math.sqrt(sum((x - m) ** 2 for x in rets) / (len(rets) - 1)) * 100, 2)
+    return {"periods": out, "max_drawdown": mdd, "daily_vol_pct": vol, "days": len(equity),
+            "best_day_pct": round(max(rets) * 100, 2) if rets else None,
+            "worst_day_pct": round(min(rets) * 100, 2) if rets else None}
+
+
+def build_league():
+    """순위표: 계좌별 화면 자료에서 한 줄씩 뽑아 수익률 순으로."""
+    cfg, rows = config(), []
+    for acct in accounts(cfg):
+        f = HOME / "docs" / "data" / "accounts" / f"{acct['id']}.json"
+        if not f.exists():
+            continue
+        st = json.loads(f.read_text(encoding="utf-8"))
+        s = st["summary"]
+        rows.append({"id": acct["id"], "name": acct["name"], "github": acct["github"], "agent": acct["agent"],
+                     "opened": st["opened"], "asof": st["equity"][-1]["d"] if st["equity"] else None,
+                     "total": s["total"], "pnl_krw": s["pnl_krw"], "pnl_pct": s["pnl_pct"], "bench_pct": s["bench_pct"],
+                     "excess_pct": None if s["bench_pct"] is None else round(s["pnl_pct"] - s["bench_pct"], 2),
+                     "cash_pct": s["cash_pct"], "n_positions": len(st["positions"]), "n_orders": s["n_orders"],
+                     "n_filled": s["n_filled"], "fees_krw": s["fees_krw"], "integrity_ok": st["integrity"]["ok"],
+                     "returns": {p["key"]: p for p in (st.get("performance") or {}).get("periods", [])},
+                     "max_drawdown_pct": ((st.get("performance") or {}).get("max_drawdown") or {}).get("pct"),
+                     "curve": [e["total"] for e in st["equity"]][-120:], "_equity": st["equity"], "_initial": st["initial"]})
+
+    def ranked(items, key):                             # 수익률 순, 같으면 같은 순위
+        items.sort(key=lambda r: (-(key(r) if key(r) is not None else -1e9), r["id"]))
+        for i, r in enumerate(items):
+            r["rank"] = items[i - 1]["rank"] if i and key(items[i - 1]) == key(r) else i + 1
+        return items
+
+    ranked(rows, lambda r: r["pnl_pct"])
+    # 대회 = 이름 붙인 기간. 계좌를 새로 열지 않고, 같은 자산 곡선에서 그 기간의 수익률만 잰다.
+    today, contests = now().date().isoformat(), []
+    for c in (cfg.get("league") or {}).get("contests") or []:
+        start, end = c.get("start"), c.get("end")
+        if not start:
+            continue
+        entries = []
+        for r in rows:
+            sr = span_return(r["_equity"], r["_initial"], start, end)
+            if sr:
+                entries.append({"id": r["id"], "name": r["name"], "agent": r["agent"], **sr})
+        contests.append({"name": c.get("name") or "대회", "start": start, "end": end,
+                         "status": "예정" if today < start else ("끝남" if end and today > end else "진행 중"),
+                         "players": ranked(entries, lambda r: r["pct"])})
+    for r in rows:
+        del r["_equity"], r["_initial"]
+    out = {"name": (cfg.get("league") or {}).get("name") or "모의 거래소", "updated": now().isoformat(timespec="seconds"),
+           "initial": cfg["initial_cash"], "periods": [{"key": k, "label": l} for k, l, _ in PERIODS] + [{"key": "ytd", "label": "올해"}, {"key": "all", "label": "처음부터"}],
+           "players": rows, "contests": contests}
+    LEAGUE_OUT.parent.mkdir(parents=True, exist_ok=True)
+    LEAGUE_OUT.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
+    return out
 
 
 # ---------- 장부 ----------
@@ -753,7 +944,8 @@ def build():
         us_gains = {"year": year, "realized_krw": round(gain), "deduction_krw": gt["deduction_krw"], "rate": gt["rate"],
                     "est_tax_krw": round(max(0.0, gain - gt["deduction_krw"]) * gt["rate"])}
     out = {
-        "account": cfg["account_name"], "updated": now().isoformat(timespec="seconds"),
+        "account": account_label(cfg), "updated": now().isoformat(timespec="seconds"),
+        "player": {k: ACCT[k] for k in ("id", "github", "name", "agent")},
         "opened": opened, "initial": st["initial"], "fee_rate": fc.get("KR", {}).get("commission_rate", cfg.get("fee_rate", 0)),
         "fees": fc,
         "rules": cfg["rules"],
@@ -775,6 +967,7 @@ def build():
             "n_orders": len(orders), "n_filled": sum(o["status"] == "filled" for o in orders),
             "n_pending": sum(o["status"] in OPEN for o in orders),
         },
+        "performance": performance(equity, st["initial"]),
         "positions": positions, "equity": equity,
         "orders": sorted(orders, key=lambda o: o["id"], reverse=True),
         "order_pnl": order_pnl,
@@ -788,6 +981,10 @@ def build():
     }
     STATE_OUT.parent.mkdir(parents=True, exist_ok=True)
     STATE_OUT.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
+    if ACCT["main"]:                                    # 주인 계좌도 다른 계좌와 같은 자리에서 읽을 수 있게 한 벌 더
+        twin = HOME / "docs" / "data" / "accounts" / f"{ACCT['id']}.json"
+        twin.parent.mkdir(parents=True, exist_ok=True)
+        twin.write_text(STATE_OUT.read_text(encoding="utf-8"), encoding="utf-8")
     return out
 
 
@@ -801,9 +998,9 @@ def cmd_open(a):
     if read_ledger():
         sys.exit("이미 열린 계좌입니다.")
     cfg = config()
-    append("open", {"account": cfg["account_name"], "initial_cash": cfg["initial_cash"],
+    append("open", {"account": account_label(cfg), "player": ACCT["github"], "initial_cash": cfg["initial_cash"],
                     "opened": now().date().isoformat(), "fees": fee_cfg(cfg), "rules": cfg["rules"]})
-    print(f"계좌 개설: {cfg['account_name']} · {cfg['initial_cash']:,}원")
+    print(f"계좌 개설: {account_label(cfg)} · {cfg['initial_cash']:,}원")
 
 
 class Refused(Exception):
@@ -845,7 +1042,9 @@ def place_order(p):
                 raise Refused(f"가격이 상·하한가 범위를 벗어납니다 — 직전 종가 {prev:,.0f}원의 ±30% 안이어야 합니다.")
     if session == "all" and typ != "limit":
         raise Refused("장전·장후(시간외)에는 지정가 주문만 낼 수 있습니다. 시장가·손절·종가 주문은 정규장에서만 체결됩니다.")
-    data = {"ref": p.get("ref") or "", "symbol": sym, "market": mkt, "side": side, "type": typ,
+    if not re.fullmatch(r"[A-Z0-9.\-]{1,12}", sym):
+        raise Refused("종목 기호가 올바르지 않습니다")
+    data = {"ref": str(p.get("ref") or "")[:80], "symbol": sym, "market": mkt, "side": side, "type": typ,
             "price": price, "session": session}
     if p.get("client_id"):
         data["client_id"] = p["client_id"]
@@ -903,7 +1102,7 @@ def place_fx_order(p, st, cfg):
         krw_amt = float(krw_amt) if krw_amt else None
     except (TypeError, ValueError):
         raise Refused("환전 금액을 읽을 수 없습니다")
-    data = {"ref": p.get("ref") or "", "symbol": px.FX_KEY, "market": "FX", "side": side, "type": "market",
+    data = {"ref": str(p.get("ref") or "")[:80], "symbol": px.FX_KEY, "market": "FX", "side": side, "type": "market",
             "price": None, "session": "regular"}
     if p.get("client_id"):
         data["client_id"] = p["client_id"]
@@ -938,44 +1137,234 @@ def cmd_order(a):
         sys.exit(str(e))
 
 
+def handle_request(req, cid):
+    """요청 하나를 지금 계좌에 접수한다. 받은 것도 안 받은 것도 장부에 남긴다. 반환 (결과, 사람 말).
+    결과: "ok" 접수 · "no" 받지 않음 · "dup" 이미 처리한 요청."""
+    st = replay(read_ledger())
+    if cid in st["seen"]:
+        return "dup", "이미 처리한 요청입니다"
+    try:
+        if not req:
+            raise Refused("요청 파일을 읽을 수 없습니다")
+        req["client_id"] = cid
+        if req.get("action", "order") == "cancel":
+            o = st["orders"].get(req.get("order"))
+            if not o or o["status"] not in OPEN:
+                raise Refused(f"취소할 수 없는 주문입니다 ({req.get('order')})")
+            append("cancel", {"order": o["id"], "why": str(req.get("why") or "운용자 요청")[:200], "client_id": cid})
+            return "ok", f"주문 {o['id']} 취소를 접수했습니다"
+        try:
+            oid = place_order(req)
+        except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
+            raise Refused("주문 내용이 올바르지 않습니다")
+        return "ok", f"주문을 접수했습니다 — 주문 번호 {oid}"
+    except Refused as e:
+        append("refuse", {"client_id": cid, "why": str(e), "ref": str(req.get("ref", ""))[:80],
+                          "symbol": str(req.get("symbol", "")).upper()[:12], "side": req.get("side") if req.get("side") in ("buy", "sell") else None,
+                          "requested_at": req.get("requested_at")})
+        return "no", f"받지 않았습니다 — {e}"
+
+
 def cmd_ingest(a):
     """주문 창구: inbox/ 의 요청 파일을 이름 순서대로 접수한다. 받은 것도 안 받은 것도 장부에 남기고 파일은 치운다.
+    inbox/*.json 은 주인 계좌, inbox/{계정}/*.json 은 그 참가자 계좌 (명단에 없는 폴더는 건드리지 않고 알리기만 한다).
     요청 파일(JSON): {"client_id": "...", "action": "order"|"cancel", ...주문 내용 또는 "order": "O0001", "why": "..."}"""
     inbox = HOME / "inbox"
-    files = sorted(f for f in inbox.glob("*.json")) if inbox.exists() else []
+    here = ACCT
+    accts = {x["id"]: x for x in accounts()}
+    boxes = [(next(x for x in accts.values() if x["main"]), inbox)]
+    if inbox.exists():
+        for d in sorted(x for x in inbox.iterdir() if x.is_dir()):
+            if d.name.lower() in accts:
+                boxes.append((accts[d.name.lower()], d))
+            elif any(d.glob("*.json")):
+                print(f"  명단에 없는 계좌의 창구라 받지 않습니다: {d.name}")
     n_ok = n_no = 0
-    for f in files:
-        try:
-            req = json.loads(f.read_text(encoding="utf-8"))
-            cid = str(req.get("client_id") or f.stem)
-            req["client_id"] = cid
-        except Exception:
-            req, cid = {}, f.stem
-        st = replay(read_ledger())
-        if cid in st["seen"]:
-            pass                                          # 이미 처리한 요청 (같은 파일이 다시 올라왔다)
-        else:
+    opened = False
+    for acct, box in boxes:
+        files = sorted(box.glob("*.json")) if box.exists() else []
+        if files and not acct["main"] and not opened:
+            open_missing()
+            opened = True
+        use(acct)
+        for f in files:
             try:
-                if not req:
-                    raise Refused("요청 파일을 읽을 수 없습니다")
-                if req.get("action", "order") == "cancel":
-                    o = st["orders"].get(req.get("order"))
-                    if not o or o["status"] not in OPEN:
-                        raise Refused(f"취소할 수 없는 주문입니다 ({req.get('order')})")
-                    append("cancel", {"order": o["id"], "why": req.get("why") or "운용자 요청", "client_id": cid})
-                    print(f"  취소 접수 {o['id']}")
-                else:
-                    oid = place_order(req)
-                    print(f"  주문 접수 {oid} ← {cid}")
-                n_ok += 1
-            except Refused as e:
-                append("refuse", {"client_id": cid, "why": str(e), "ref": req.get("ref", ""),
-                                  "symbol": str(req.get("symbol", "")).upper(), "side": req.get("side"),
-                                  "requested_at": req.get("requested_at")})
-                print(f"  받지 않음 {cid} — {e}")
-                n_no += 1
-        f.unlink()
+                req = json.loads(f.read_text(encoding="utf-8"))
+                cid = str(req.get("client_id") or f.stem)[:60]
+                if not isinstance(req, dict):
+                    raise ValueError
+            except Exception:
+                req, cid = {}, f.stem[:60]
+            req.pop("account", None)
+            res, msg = handle_request(req, cid)
+            if res != "dup":                              # 이미 처리한 요청(같은 파일이 다시 올라왔다)은 조용히 치운다
+                print(f"  [{acct['id']}] {cid} — {msg}")
+                n_ok, n_no = n_ok + (res == "ok"), n_no + (res == "no")
+            f.unlink()
+    use(here)
     print(f"주문 창구: 접수 {n_ok}건, 받지 않음 {n_no}건")
+
+
+MAX_PER_ISSUE = 10
+
+
+def parse_issue(body):
+    """주문 이슈 본문에서 요청을 꺼낸다. JSON 하나 또는 여러 개(목록). ``` 로 감싼 부분이 있으면 그 안만 본다."""
+    body = (body or "")[:20000]
+    m = re.search(r"```(?:json)?\s*(.*?)```", body, re.S)
+    obj = json.loads(m.group(1) if m else body)
+    reqs = obj if isinstance(obj, list) else [obj]
+    if not reqs or len(reqs) > MAX_PER_ISSUE or not all(isinstance(r, dict) for r in reqs):
+        raise ValueError
+    return reqs
+
+
+def owner_login(cfg):
+    """거래소 주인의 GitHub 계정: 설정에 적힌 것 → 주인 계좌의 계정 → 저장소 주인."""
+    return ((cfg.get("league") or {}).get("owner")
+            or next((p.get("github") for p in cfg.get("players") or [] if p.get("main")), None)
+            or os.environ.get("GITHUB_REPOSITORY_OWNER") or "")
+
+
+def _save_config(cfg):
+    (HOME / "config.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _day(v):
+    return datetime.strptime(str(v), "%Y-%m-%d").strftime("%Y-%m-%d")
+
+
+def admin_do(cfg, req):
+    """관리 명령 하나를 설정에 적용한다. 반환: 사람 말. 안 되면 Refused."""
+    act = req.get("action")
+    players = cfg.setdefault("players", [])
+    league = cfg.setdefault("league", {})
+    if act in ("add_player", "remove_player"):
+        gh = str(req.get("github") or "").strip().lstrip("@")
+        pid = str(req.get("id") or gh).strip().lower()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,38}", pid) or (gh and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}", gh)):
+            raise Refused("계정 이름이 올바르지 않습니다 (영문·숫자·줄표)")
+        key = lambda p: str(p.get("id") or p.get("github") or "").lower()
+        cur = next((p for p in players if key(p) == pid), None)
+        if act == "add_player":
+            name = str(req.get("name") or (cur or {}).get("name") or gh or pid).strip()[:40]
+            agent = str(req.get("agent") or "").strip()[:60] or None
+            email = str(req.get("email") or "").strip().lower()[:120] or None
+            if email and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+                raise Refused("이메일이 올바르지 않습니다")
+            if email and any(str(p.get("email") or "").lower() == email and p is not cur for p in players):
+                raise Refused("그 이메일은 이미 다른 계좌에 쓰이고 있습니다")
+            login = str(req.get("login") or "").strip().lower()[:60] or None      # 로그인하는 곳(sharktalk)에서의 아이디
+            if login and any(str(p.get("login") or "").lower() == login and p is not cur for p in players):
+                raise Refused("그 로그인 아이디는 이미 다른 계좌에 쓰이고 있습니다")
+            if cur:                                       # 이미 있으면 이름·에이전트·이메일·아이디만 고친다
+                cur["name"] = name
+                for k, v in (("agent", agent), ("email", email), ("login", login), ("github", gh or None)):
+                    if v:
+                        cur[k] = v
+                return f"`{pid}` 의 정보를 고쳤습니다 (이름 '{name}')"
+            new = {"id": pid, "github": gh or None, "email": email, "login": login, "name": name, "agent": agent}
+            if gh and gh.lower() == pid:
+                new.pop("id")
+            players.append({k: v for k, v in new.items() if v})
+            return f"`{pid}` 을(를) '{name}'(으)로 명단에 넣었습니다. 계좌가 시작 금액 {cfg['initial_cash']:,}원으로 열립니다"
+        if not cur:
+            raise Refused(f"`{pid}` 은(는) 명단에 없습니다")
+        if cur.get("main"):
+            raise Refused("주인 계좌는 뺄 수 없습니다")
+        players.remove(cur)
+        return f"`{pid}` 을(를) 명단에서 뺐습니다. 장부는 그대로 남고, 더 이상 주문을 받지 않으며 전체 수익률 표에서 빠집니다"
+    if act in ("add_contest", "remove_contest"):
+        name = str(req.get("name") or "").strip()[:40]
+        if not name:
+            raise Refused("대회 이름이 필요합니다")
+        cs = league.setdefault("contests", [])
+        cur = next((c for c in cs if c.get("name") == name), None)
+        if act == "remove_contest":
+            if not cur:
+                raise Refused(f"'{name}' 대회가 없습니다")
+            cs.remove(cur)
+            return f"'{name}' 대회를 뺐습니다"
+        try:
+            start = _day(req.get("start"))
+            end = _day(req["end"]) if req.get("end") else None
+        except Exception:
+            raise Refused("날짜는 2026-12-01 처럼 적습니다")
+        if end and end < start:
+            raise Refused("끝 날이 시작 날보다 앞섭니다")
+        new = {"name": name, "start": start, "end": end}
+        if cur:
+            cur.update(new)
+        else:
+            cs.append(new)
+        return f"'{name}' 대회를 {start} ~ {end or '끝 없음'} 으로 정했습니다"
+    raise Refused("모르는 관리 명령입니다 (add_player · remove_player · add_contest · remove_contest)")
+
+
+def cmd_admin_issue(author, body):
+    """관리 이슈: 주인 계정이 연 것만 받는다. 설정(config.json)을 고치고, 새 참가자의 계좌를 바로 연다."""
+    cfg = config()
+    owner = owner_login(cfg)
+    if not owner or author.lower() != owner.lower():
+        return [f"관리 명령은 거래소 주인만 낼 수 있습니다. `{author}` 계정의 요청은 받지 않았습니다."]
+    try:
+        reqs = parse_issue(body)
+    except Exception:
+        return ["관리 명령을 읽을 수 없습니다. 예: `{\"action\": \"add_player\", \"github\": \"계정\", \"name\": \"화면에 나올 이름\"}`"]
+    lines, changed = [], False
+    for req in reqs:
+        try:
+            lines.append(f"- {admin_do(cfg, req)}")
+            changed = True
+        except Refused as e:
+            lines.append(f"- 하지 않았습니다 — {e}")
+    if changed:
+        _save_config(cfg)
+        open_missing()
+    roster = ", ".join(f"{x['name']}(`{x['id']}`)" for x in accounts())
+    return lines + ["", f"지금 명단: {roster}"]
+
+
+def cmd_issue(a):
+    """이슈 하나를 처리한다. 제목이 "[관리]" 로 시작하면 관리 명령(주인만), 아니면 주문.
+    주문 이슈 하나를 접수한다. 이슈를 쓴 GitHub 계정이 곧 계좌다 — 요청 안에 적힌 계좌는 보지 않는다.
+    환경변수: PAPER_ISSUE_AUTHOR, PAPER_ISSUE_NUMBER, PAPER_ISSUE_BODY, PAPER_ISSUE_AT(이슈를 연 시각), PAPER_REPLY(답글을 적을 파일)."""
+    author = os.environ.get("PAPER_ISSUE_AUTHOR", "").strip()
+    num = re.sub(r"\D", "", os.environ.get("PAPER_ISSUE_NUMBER", "")) or "0"
+    if os.environ.get("PAPER_ISSUE_TITLE", "").strip().startswith("[관리]"):
+        text = "\n".join(cmd_admin_issue(author, os.environ.get("PAPER_ISSUE_BODY", "")))
+        print(text)
+        if os.environ.get("PAPER_REPLY"):
+            Path(os.environ["PAPER_REPLY"]).write_text(text + "\n", encoding="utf-8")
+        return
+    acct = next((x for x in accounts() if x["github"] and x["github"].lower() == author.lower()), None)
+    lines = []
+    if not acct:
+        lines.append(f"`{author}` 계정은 참가자 명단에 없어 주문을 받지 않았습니다. 거래소 주인에게 초대를 요청해 주세요.")
+    else:
+        open_missing()
+        use(acct)
+        try:
+            reqs = parse_issue(os.environ.get("PAPER_ISSUE_BODY", ""))
+        except Exception:
+            reqs = None
+        if reqs is None:
+            res, msg = handle_request({}, f"issue-{num}")
+            lines.append(f"- 받지 않았습니다 — 주문 내용을 읽을 수 없습니다. 주문 하나 또는 {MAX_PER_ISSUE}개까지의 목록을 정해진 모양으로 적어 주세요.")
+        else:
+            for i, req in enumerate(reqs):
+                cid = str(req.get("client_id") or (f"issue-{num}" + (f"-{i + 1}" if len(reqs) > 1 else "")))[:60]
+                req.pop("account", None)
+                req.setdefault("requested_at", os.environ.get("PAPER_ISSUE_AT") or None)
+                res, msg = handle_request(req, cid)
+                lines.append(f"- {msg}")
+        lines.insert(0, f"**{acct['name']}** 계좌 · 접수 시각 {now().strftime('%Y-%m-%d %H:%M')} (한국)")
+        lines.append("")
+        lines.append("체결은 주문 뒤에 시작한 1분 시세부터 이뤄지고, 매시 정기 실행 때 장부와 화면에 반영됩니다.")
+    text = "\n".join(lines)
+    print(text)
+    if os.environ.get("PAPER_REPLY"):
+        Path(os.environ["PAPER_REPLY"]).write_text(text + "\n", encoding="utf-8")
 
 
 def cmd_cancel(a):
@@ -987,19 +1376,32 @@ def cmd_cancel(a):
     print("취소:", a.order)
 
 
+def each_account(a):
+    """--account 가 있으면 그 계좌만, 없으면 모든 계좌를 차례로."""
+    accts = [pick(a.account)] if getattr(a, "account", None) else accounts()
+    for acct in accts:
+        use(acct)
+        if read_ledger():
+            yield acct
+
+
 def cmd_update(a):
-    st = replay(read_ledger())
-    t = now()
-    for k in needed_keys(st, config()):
+    cfg, t = config(), now()
+    keys, need = set(), set()
+    for _ in each_account(a):                             # 시세는 모든 계좌가 함께 쓴다
+        st = replay(read_ledger())
+        keys |= set(needed_keys(st, cfg))
+        # 1분 시세: 살아 있는 주문·보유 종목만 (체결 계산에 쓰인다). 미국 종목이나 달러가 있으면 환율도.
+        mine = {o["symbol"] for o in st["orders"].values() if o["status"] in OPEN} | {s for s, l in st["lots"].items() if l}
+        if any(px.market_of(k) == "US" for k in mine) or st["usd"] >= 0.01:
+            mine.add(px.FX_KEY)
+        need |= mine
+    for k in sorted(keys):
         try:
             c = px.update(HOME, k, t)
             print(f"  {k:8s} ~{c['bars'][-1]['d'] if c['bars'] else '없음'}  {c['name']}")
         except Exception as e:
             print(f"  {k:8s} 수집 실패: {e}")
-    # 1분 시세: 살아 있는 주문·보유 종목만 (체결 계산에 쓰인다). 미국 종목이 있으면 환율도.
-    need = {o["symbol"] for o in st["orders"].values() if o["status"] in OPEN} | {s for s, l in st["lots"].items() if l}
-    if any(px.market_of(k) == "US" for k in need) or st["usd"] >= 0.01:
-        need.add(px.FX_KEY)
     for k in sorted(need):
         try:
             n1, n5 = px.update_minutes(HOME, k, t)
@@ -1009,8 +1411,14 @@ def cmd_update(a):
 
 
 def cmd_settle(a):
+    for acct in each_account(a):
+        _settle_one(acct)
+
+
+def _settle_one(acct):
     for e in settle():
         d = e["data"]
+        print(f" [{acct['id']}]", end="")
         if e["type"] == "fill":
             print(f"  체결 {d['order']} {d['symbol']} {d['side']} {d['qty']}주 @ {d['price']} ({d['date']})")
         elif e["type"] == "fx":
@@ -1024,13 +1432,18 @@ def cmd_settle(a):
 
 
 def cmd_build(a):
-    s = build()["summary"]
-    print(f"화면 자료 갱신: 총자산 {s['total']:,}원 ({s['pnl_pct']:+.2f}%), 현금 {s['cash_pct']}%")
+    for acct in each_account(a):
+        s = build()["summary"]
+        print(f"화면 자료 갱신 [{acct['id']}]: 총자산 {s['total']:,}원 ({s['pnl_pct']:+.2f}%), 현금 {s['cash_pct']}%")
+    lg = build_league()
+    print(f"순위표: {len(lg['players'])}계좌")
 
 
 def cmd_daily(a):
+    use(pick(None))
     need_open(replay(read_ledger()))
-    cmd_ingest(a)
+    open_missing()                                        # 명단에 새로 들어온 참가자의 계좌를 연다
+    cmd_ingest(a)                                         # 주인 계좌의 창구 (다른 참가자는 주문 이슈로 들어온다)
     print("가격 갱신"); cmd_update(a)
     print("체결"); cmd_settle(a)
     cmd_build(a)
@@ -1050,13 +1463,18 @@ def cmd_status(a):
 
 
 def cmd_verify(a):
-    ok, n = verify()
-    print(f"장부 {n}줄 — 이상 없음" if ok else f"장부 {n}번째 줄에서 지문이 맞지 않습니다")
-    sys.exit(0 if ok else 1)
+    bad = 0
+    for acct in each_account(a):
+        ok, n = verify()
+        head = f"[{acct['id']}] " if len(accounts()) > 1 else ""
+        print(f"{head}장부 {n}줄 — 이상 없음" if ok else f"{head}장부 {n}번째 줄에서 지문이 맞지 않습니다")
+        bad += not ok
+    sys.exit(1 if bad else 0)
 
 
 def main():
     p = argparse.ArgumentParser(description="모의 증권 거래 시스템")
+    p.add_argument("--account")                                            # 다룰 계좌(참가자 GitHub 계정). 없으면 주인 계좌
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("open").set_defaults(f=cmd_open)
     s = sub.add_parser("order")
@@ -1071,15 +1489,17 @@ def main():
     s = sub.add_parser("cancel"); s.add_argument("--order", required=True); s.add_argument("--why", required=True)
     s.set_defaults(f=cmd_cancel)
     sub.add_parser("ingest").set_defaults(f=cmd_ingest)
+    sub.add_parser("issue").set_defaults(f=cmd_issue)
     for n, f in [("update", cmd_update), ("settle", cmd_settle), ("build", cmd_build),
                  ("daily", cmd_daily), ("status", cmd_status), ("verify", cmd_verify)]:
         sub.add_parser(n).set_defaults(f=f)
     a = p.parse_args()
     # 장부는 거래소 한 곳만 쓴다: 클라우드가 쓰기로 정해져 있으면 이 PC 에서는 읽기만 한다 (시험 폴더는 예외)
-    writes = {"open", "order", "cancel", "ingest", "update", "settle", "build", "daily"}
+    writes = {"open", "order", "cancel", "ingest", "issue", "update", "settle", "build", "daily"}
     if (a.cmd in writes and config().get("ledger_writer") == "cloud" and not os.environ.get("GITHUB_ACTIONS")
             and not os.environ.get("PAPER_HOME")):
         sys.exit("이 장부는 클라우드 거래소(GitHub 자동 실행)만 씁니다. 주문은 일지 도구로 요청하고, 상태는 git pull 로 받아 보세요.")
+    use(pick(a.account))
     a.f(a)
 
 
