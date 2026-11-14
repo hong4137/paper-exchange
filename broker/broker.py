@@ -15,7 +15,12 @@
   python broker/broker.py cancel --order O0001 --why ..
   python broker/broker.py daily                     시세 갱신 → 체결 → 화면 자료 만들기
   python broker/broker.py status | verify
-시험할 때는 환경변수 PAPER_HOME(임시 폴더), PAPER_NOW(가짜 현재 시각)를 쓴다.
+  python broker/broker.py ingest                    주문 창구(inbox/)에 들어온 요청을 접수한다
+
+장부는 거래소 한 곳만 쓴다 (config.json "ledger_writer": "cloud" 일 때 = GitHub 자동 실행).
+  운용자는 주문 요청 파일을 inbox/ 에 올리기만 하고, 거래소가 받아서 자기 시각으로 접수한다.
+  그래서 이 PC 에서 open·order·cancel·settle·daily·ingest·build 를 직접 돌리면 거절된다 (읽기 전용인 status·verify 는 된다).
+시험할 때는 환경변수 PAPER_HOME(임시 폴더), PAPER_NOW(가짜 현재 시각)를 쓴다 — 그때는 잠금이 풀린다.
 """
 import argparse
 import hashlib
@@ -84,7 +89,7 @@ def verify(events=None):
 # ---------- 상태 다시 만들기 ----------
 def replay(events):
     st = {"cash": 0.0, "opened": None, "initial": 0.0, "lots": {}, "orders": {}, "fills": [],
-          "realized": {}, "last_buy": {}, "last_buy_ts": {}}
+          "realized": {}, "last_buy": {}, "last_buy_ts": {}, "refused": [], "seen": set()}
     for e in events:
         t, d = e["type"], e["data"]
         if t == "open":
@@ -93,9 +98,17 @@ def replay(events):
         elif t == "order":
             st["orders"][d["id"]] = {**d, "ts": e["ts"], "status": "pending", "result": None,
                                      "filled_qty": 0, "fills": []}
+            if d.get("client_id"):
+                st["seen"].add(d["client_id"])
+        elif t == "refuse":                             # 창구로 들어온 요청을 받지 않았다
+            st["refused"].append({**d, "ts": e["ts"]})
+            if d.get("client_id"):
+                st["seen"].add(d["client_id"])
         elif t == "cancel":
             o = st["orders"][d["order"]]
             o["status"], o["result"] = "canceled", {**(o["result"] or {}), "ts": e["ts"], "why": d["why"]}
+            if d.get("client_id"):
+                st["seen"].add(d["client_id"])
         elif t in ("reject", "expire"):
             o = st["orders"][d["order"]]
             o["status"] = "rejected" if t == "reject" else "expired"
@@ -369,6 +382,8 @@ def build():
             txt = f"만료 {d['order']} — {d['why']}"
         elif t == "cancel":
             txt = f"취소 {d['order']} — {d['why']}"
+        elif t == "refuse":
+            txt = f"주문 요청을 받지 않았습니다 — {d['why']}"
         else:
             continue
         feed.append({"seq": e["seq"], "ts": e["ts"], "type": t, "text": txt})
@@ -394,6 +409,7 @@ def build():
         "positions": positions, "equity": equity,
         "orders": sorted(orders, key=lambda o: o["id"], reverse=True),
         "order_pnl": order_pnl,
+        "refused": list(reversed(st["refused"])),
         "feed": feed[:300],
         "integrity": {"ok": ok, "lines": len(events), "head": events[-1]["hash"][:12] if events else None,
                       "broken_at": None if ok else n},
@@ -420,43 +436,60 @@ def cmd_open(a):
     print(f"계좌 개설: {cfg['account_name']} · {cfg['initial_cash']:,}원")
 
 
-def cmd_order(a):
+class Refused(Exception):
+    """주문을 받지 않는 이유."""
+
+
+def place_order(p):
+    """주문 하나를 검사해 장부에 접수한다. p: symbol, side, type, qty, krw, price, session, valid_days, ref, client_id, requested_at.
+    받지 않으면 Refused(이유)."""
     cfg = config()
     st = replay(read_ledger())
-    need_open(st)
-    sym = a.symbol.upper()
+    if st["opened"] is None:
+        raise Refused("계좌가 없습니다")
+    sym = str(p.get("symbol", "")).upper()
+    side, typ, price = p.get("side"), p.get("type") or "market", p.get("price")
+    session = p.get("session") or "regular"
+    qty, krw_amt = p.get("qty"), p.get("krw")
+    if not sym or side not in ("buy", "sell") or typ not in ("market", "moc", "limit", "stop") or session not in ("regular", "all"):
+        raise Refused("주문 내용이 올바르지 않습니다")
     mkt = px.market_of(sym)
     if mkt not in cfg["markets"]:
-        sys.exit(f"{mkt} 시장은 허용되지 않습니다.")
-    if a.type in ("limit", "stop") and a.price is None:
-        sys.exit("지정가·손절 주문에는 --price 가 필요합니다.")
-    if a.price is not None and mkt == "KR":
+        raise Refused(f"{mkt} 시장은 허용되지 않습니다.")
+    if typ in ("limit", "stop") and price is None:
+        raise Refused("지정가·손절 주문에는 가격이 필요합니다.")
+    if price is not None:
+        price = float(price)
+    if price is not None and mkt == "KR":
         daily = px.load(HOME, sym)
         md = px.minute_dates(HOME, sym)
         if md:                                   # 호가 단위: 최근 시세에 실제로 찍힌 값들로 판단
             tick = mt.infer_tick("KR", px.load_minutes(HOME, sym, md[-1])["bars"])
-            if a.price % tick:
-                sys.exit(f"호가 단위에 맞지 않습니다 — {sym} 은(는) {tick:,}원 단위입니다.")
+            if price % tick:
+                raise Refused(f"호가 단위에 맞지 않습니다 — {sym} 은(는) {tick:,}원 단위입니다.")
         if daily and daily["bars"]:              # 상·하한가 (전일 종가의 ±30%)
             prev = daily["bars"][-1]["c"]
-            if not prev * 0.7 <= a.price <= prev * 1.3:
-                sys.exit(f"가격이 상·하한가 범위를 벗어납니다 — 직전 종가 {prev:,.0f}원의 ±30% 안이어야 합니다.")
-    if a.session == "all" and a.type != "limit":
-        sys.exit("장전·장후(시간외)에는 지정가 주문만 낼 수 있습니다. 시장가·손절·종가 주문은 정규장에서만 체결됩니다.")
-    data = {"ref": a.ref or "", "symbol": sym, "market": mkt, "side": a.side, "type": a.type,
-            "price": a.price, "session": a.session}
-    if a.side == "buy":
-        if bool(a.qty) == bool(a.krw):
-            sys.exit("살 때는 --qty(주 수) 또는 --krw(금액) 중 하나만 적습니다.")
-        if a.qty:
-            data["qty"] = int(a.qty)
+            if not prev * 0.7 <= price <= prev * 1.3:
+                raise Refused(f"가격이 상·하한가 범위를 벗어납니다 — 직전 종가 {prev:,.0f}원의 ±30% 안이어야 합니다.")
+    if session == "all" and typ != "limit":
+        raise Refused("장전·장후(시간외)에는 지정가 주문만 낼 수 있습니다. 시장가·손절·종가 주문은 정규장에서만 체결됩니다.")
+    data = {"ref": p.get("ref") or "", "symbol": sym, "market": mkt, "side": side, "type": typ,
+            "price": price, "session": session}
+    if p.get("client_id"):
+        data["client_id"] = p["client_id"]
+        data["requested_at"] = p.get("requested_at")
+    if side == "buy":
+        if bool(qty) == bool(krw_amt):
+            raise Refused("살 때는 주 수 또는 금액 중 하나만 적습니다.")
+        if qty:
+            data["qty"] = int(qty)
         else:
-            data["krw"] = float(a.krw)
+            data["krw"] = float(krw_amt)
         # 주문 가능 금액 확인 (실제 증권사처럼 접수 단계에서) — 수량 주문은 지정가나 직전 종가로 어림
         need = data.get("krw")
         if need is None:
             daily = px.load(HOME, sym)
-            ref = a.price if a.type == "limit" else (daily["bars"][-1]["c"] if daily and daily["bars"] else None)
+            ref = price if typ == "limit" else (daily["bars"][-1]["c"] if daily and daily["bars"] else None)
             if ref is not None:
                 rate = 1.0
                 if mkt == "US":
@@ -464,20 +497,68 @@ def cmd_order(a):
                     rate = fxd["bars"][-1]["c"] if fxd and fxd["bars"] else None
                 need = data["qty"] * ref * rate if rate else None
         if need is not None and need > st["cash"]:
-            sys.exit(f"주문 가능 금액이 모자랍니다 — 필요 약 {round(need):,}원, 현금 {round(st['cash']):,}원")
+            raise Refused(f"주문 가능 금액이 모자랍니다 — 필요 약 {round(need):,}원, 현금 {round(st['cash']):,}원")
     else:
-        if a.krw:
-            sys.exit("팔 때는 --qty 주 수 또는 --qty all 로 적습니다.")
+        if krw_amt:
+            raise Refused("팔 때는 주 수 또는 전량(all)으로 적습니다.")
         pending_buy = any(o["status"] in OPEN and o["symbol"] == sym and o["side"] == "buy"
                           for o in st["orders"].values())
         if held(st, sym) == 0 and not pending_buy:
-            sys.exit(f"{sym} 을(를) 보유하고 있지 않습니다. 공매도는 없습니다.")
-        data["qty"] = "all" if a.qty in (None, "all") else int(a.qty)
-    days = a.valid_days or cfg["order_valid_days"]
+            raise Refused(f"{sym} 을(를) 보유하고 있지 않습니다. 공매도는 없습니다.")
+        data["qty"] = "all" if qty in (None, "all") else int(qty)
+    days = int(p.get("valid_days") or cfg["order_valid_days"])
     data["valid_until"] = (now().date() + timedelta(days=days)).isoformat()
     data["id"] = f"O{len(st['orders']) + 1:04d}"
     append("order", data)
-    print(data["id"])
+    return data["id"]
+
+
+def cmd_order(a):
+    try:
+        print(place_order({"symbol": a.symbol, "side": a.side, "type": a.type, "qty": a.qty, "krw": a.krw,
+                           "price": a.price, "session": a.session, "valid_days": a.valid_days, "ref": a.ref}))
+    except Refused as e:
+        sys.exit(str(e))
+
+
+def cmd_ingest(a):
+    """주문 창구: inbox/ 의 요청 파일을 이름 순서대로 접수한다. 받은 것도 안 받은 것도 장부에 남기고 파일은 치운다.
+    요청 파일(JSON): {"client_id": "...", "action": "order"|"cancel", ...주문 내용 또는 "order": "O0001", "why": "..."}"""
+    inbox = HOME / "inbox"
+    files = sorted(f for f in inbox.glob("*.json")) if inbox.exists() else []
+    n_ok = n_no = 0
+    for f in files:
+        try:
+            req = json.loads(f.read_text(encoding="utf-8"))
+            cid = str(req.get("client_id") or f.stem)
+            req["client_id"] = cid
+        except Exception:
+            req, cid = {}, f.stem
+        st = replay(read_ledger())
+        if cid in st["seen"]:
+            pass                                          # 이미 처리한 요청 (같은 파일이 다시 올라왔다)
+        else:
+            try:
+                if not req:
+                    raise Refused("요청 파일을 읽을 수 없습니다")
+                if req.get("action", "order") == "cancel":
+                    o = st["orders"].get(req.get("order"))
+                    if not o or o["status"] not in OPEN:
+                        raise Refused(f"취소할 수 없는 주문입니다 ({req.get('order')})")
+                    append("cancel", {"order": o["id"], "why": req.get("why") or "운용자 요청", "client_id": cid})
+                    print(f"  취소 접수 {o['id']}")
+                else:
+                    oid = place_order(req)
+                    print(f"  주문 접수 {oid} ← {cid}")
+                n_ok += 1
+            except Refused as e:
+                append("refuse", {"client_id": cid, "why": str(e), "ref": req.get("ref", ""),
+                                  "symbol": str(req.get("symbol", "")).upper(), "side": req.get("side"),
+                                  "requested_at": req.get("requested_at")})
+                print(f"  받지 않음 {cid} — {e}")
+                n_no += 1
+        f.unlink()
+    print(f"주문 창구: 접수 {n_ok}건, 받지 않음 {n_no}건")
 
 
 def cmd_cancel(a):
@@ -526,6 +607,7 @@ def cmd_build(a):
 
 def cmd_daily(a):
     need_open(replay(read_ledger()))
+    cmd_ingest(a)
     print("가격 갱신"); cmd_update(a)
     print("체결"); cmd_settle(a)
     cmd_build(a)
@@ -564,10 +646,16 @@ def main():
     s.set_defaults(f=cmd_order)
     s = sub.add_parser("cancel"); s.add_argument("--order", required=True); s.add_argument("--why", required=True)
     s.set_defaults(f=cmd_cancel)
+    sub.add_parser("ingest").set_defaults(f=cmd_ingest)
     for n, f in [("update", cmd_update), ("settle", cmd_settle), ("build", cmd_build),
                  ("daily", cmd_daily), ("status", cmd_status), ("verify", cmd_verify)]:
         sub.add_parser(n).set_defaults(f=f)
     a = p.parse_args()
+    # 장부는 거래소 한 곳만 쓴다: 클라우드가 쓰기로 정해져 있으면 이 PC 에서는 읽기만 한다 (시험 폴더는 예외)
+    writes = {"open", "order", "cancel", "ingest", "update", "settle", "build", "daily"}
+    if (a.cmd in writes and config().get("ledger_writer") == "cloud" and not os.environ.get("GITHUB_ACTIONS")
+            and not os.environ.get("PAPER_HOME")):
+        sys.exit("이 장부는 클라우드 거래소(GitHub 자동 실행)만 씁니다. 주문은 일지 도구로 요청하고, 상태는 git pull 로 받아 보세요.")
     a.f(a)
 
 

@@ -17,6 +17,21 @@
   2026-11-14 첫 실행에서 야후·네이버·다음 일곱 군데가 **GitHub 에서도 전부 열렸다.**
 - 공개 저장소다. 결정문·보고서·토큰·운용자 자료를 여기에 넣지 않는다.
 
+## 클라우드에서 돈다 — 장부는 거래소만 쓴다 (2026-11-14)
+사용자 구도: **선수는 로컬에, 경기장은 클라우드에.** 거래소는 GitHub 자동 실행으로 돌고, 장부(`ledger/`)·시세(`data/`)·화면 자료(`docs/data/`)는 자동 실행만 쓴다.
+- `config.json` 의 `"ledger_writer": "cloud"` 가 잠금이다. 이 PC 에서 `open·order·cancel·ingest·update·settle·build·daily` 를 돌리면 거절된다(시험 폴더 `PAPER_HOME` 은 예외). `status`·`verify` 는 된다.
+- **주문 창구 `inbox/`**: 운용자(일지 도구)가 요청 파일을 올리면 `order-window` 실행이 바로 접수한다. 접수 시각 = 거래소가 받은 시각. 요청 시각은 `requested_at` 로 따로 남는다.
+  받지 않은 요청도 사유와 함께 장부에 `refuse` 줄로 남고 `state.json` 의 `refused` 로 나간다. 같은 요청(`client_id`)은 두 번 받지 않는다. 처리한 파일은 창구에서 지운다.
+  요청 파일: `{"client_id", "action": "order"|"cancel", "ref", "symbol", "side", "type", "qty"|"krw", "price", "session", "valid_days", "requested_at"}` / 취소는 `{"client_id", "action": "cancel", "order", "why"}`.
+- 자동 실행 (`.github/workflows/`):
+  - `daily.yml`(이름 exchange) — 매시 7분, 그리고 `broker/`·`config.json` 이 바뀔 때: 창구 접수 → 시세 갱신 → 체결 → 화면 자료 → 올리기
+  - `ingest.yml`(order-window) — `inbox/` 에 요청이 올라올 때: 접수 → 화면 자료 → 올리기
+  - `premarket.yml`(kr-premarket) — 평일 07:55: 한국 장전 시세 모으기 (`broker/live.py`). 한국 종목이 없으면 바로 끝난다
+  - `probe.yml` — `broker/`·`tests/` 가 바뀔 때: 시험과 시세 원천 확인
+  - 장부에 쓰는 실행은 `concurrency: ledger` 로 한 번에 하나만 돈다. 올리기는 `.github/commit.sh`.
+- 코드를 고친 뒤에는 시험(임시 폴더)만 이 PC 에서 돌리고, 올리면 클라우드가 실제 장부로 돈다. **올리기 전에 `git pull --rebase`** — 클라우드가 그사이 자료를 올렸을 수 있다.
+- GitHub 예약 실행은 늦게 시작될 수 있다. 1분 시세가 8일치뿐이므로 정기 실행이 며칠 멈추면 그 사이 체결은 하루 시세로 어림된다.
+
 ## 구조
 ```
 config.json           계좌 이름, 시작 금액, 비용, 비교 기준, 체결 가정값, 규칙 문장 (화면에 그대로 나온다)
@@ -33,6 +48,9 @@ docs/data/demo.json   화면 확인용 자료 (index.html?demo). tests/make_demo
 tests/test_broker.py  장부·종가 주문·산 주문별 손익 시험 — 임시 폴더·가짜 가격으로만 돈다
 tests/test_intraday.py 1분 체결 시험 (시장가·지정가·손절·거래량 한도·이어 체결·호가 단위·환율·시간외)
 tests/make_demo_real.py 실제 1분 시세에 가짜 주문을 넣어 demo.json 을 만든다 (네트워크 필요, 날짜는 최근 거래일로)
+tests/probe_sources.py 시세 원천이 열리는지 확인 (아무것도 저장하지 않는다)
+inbox/                주문 창구 — 운용자가 올린 주문 요청 파일이 접수 전까지 잠깐 머문다
+.github/              자동 실행 네 가지와 올리기 스크립트
 운용자/               ⚠ 운용자의 생각(운용-준비서.md, 승인서-성적표.md) — 거래소 것이 아니다. 분리 전에 여기 만들어졌다.
                       `../모의투자-일지/` 로 옮겨야 한다(운용자 쪽 방이 옮긴다). 그때까지 저장소에 올리지 않는다(.gitignore).
 .env                  ⚠ 텔레그램 토큰 — 이제 일지의 것이다. 일지 도구가 여기서도 찾아 쓰지만 `../모의투자-일지/.env` 로 옮기는 것이 맞다.
@@ -83,4 +101,5 @@ tests/make_demo_real.py 실제 1분 시세에 가짜 주문을 넣어 demo.json 
 - 원화 한 주머니다. 달러 예수금·환전 비용, 시장별 세금은 아직 없다 (다음 단계).
 - 한국 포털 "현재가"는 애프터마켓 가격이라 평가에 쓰지 않는다. 야후 `.KS` 도 쓰지 않는다.
 - 계좌가 하나다. 여러 계좌는 아직 없다.
-- 매일 자동 실행은 아직 걸려 있지 않다.
+- 거래소 화면의 웹 주소(GitHub Pages)는 사용자가 저장소 설정에서 켜야 열린다.
+- 1분 시세 파일이 저장소에 쌓인다(보유 종목 수 × 거래일). 오래 운용하면 저장소가 커진다 — 그때 압축·분리를 검토한다.

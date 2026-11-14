@@ -106,6 +106,29 @@ check("주문에 꼬리표가 실려 다닌다", o["O0001"]["ref"] == "T1" and o
 check("거래소 화면 자료에는 결정·보고가 없다", not any(k in st for k in ("decisions", "reports", "sources", "memos", "interventions")))
 check("장부 지문 이상 없음", st["integrity"]["ok"])
 
+# 주문 창구: 요청 파일을 접수하고, 안 받는 것도 사유와 함께 남기고, 같은 요청은 두 번 받지 않는다
+inbox = tmp / "inbox"
+inbox.mkdir()
+SAT = "2026-11-07T10:00:00+09:00"
+(inbox / "001-a.json").write_text(json.dumps({"client_id": "c-a", "action": "order", "ref": "T9", "symbol": "000001",
+                                               "side": "buy", "qty": 3, "type": "moc", "requested_at": "2026-11-07T09:59:00+09:00"}), encoding="utf-8")
+(inbox / "002-b.json").write_text(json.dumps({"client_id": "c-b", "symbol": "ZZZ", "side": "sell", "qty": 1}), encoding="utf-8")
+(inbox / "003-c.json").write_text("{깨진 파일", encoding="utf-8")
+out = run(SAT, "ingest").stdout
+st3 = json.loads((tmp / "docs" / "data" / "state.json").read_text(encoding="utf-8")) if run(SAT, "build") else None
+new = [x for x in st3["orders"] if x.get("client_id") == "c-a"]
+check("창구로 온 주문이 접수되고 요청 번호가 따라간다", len(new) == 1 and new[0]["ref"] == "T9" and new[0]["ts"].startswith("2026-11-07T10:00"), out)
+why = {r["client_id"]: r["why"] for r in st3["refused"]}
+check("받지 않은 요청은 사유와 함께 장부에 남는다", "보유하고 있지 않습니다" in why.get("c-b", "") and "읽을 수 없습니다" in why.get("003-c", ""), str(why))
+check("처리한 요청 파일은 창구에서 치운다", not list(inbox.glob("*.json")))
+(inbox / "004-again.json").write_text(json.dumps({"client_id": "c-a", "symbol": "000001", "side": "buy", "qty": 3, "type": "moc"}), encoding="utf-8")
+(inbox / "005-cancel.json").write_text(json.dumps({"client_id": "c-x", "action": "cancel", "order": new[0]["id"], "why": "시험 취소"}), encoding="utf-8")
+run(SAT, "ingest")
+st3 = json.loads((tmp / "docs" / "data" / "state.json").read_text(encoding="utf-8")) if run(SAT, "build") else None
+again = [x for x in st3["orders"] if x.get("client_id") == "c-a"]
+check("같은 요청은 두 번 접수되지 않는다", len(again) == 1)
+check("창구로 온 취소 요청이 처리된다", again[0]["status"] == "canceled" and again[0]["result"]["why"] == "시험 취소", str(again[0]["status"]))
+
 led = tmp / "ledger" / "ledger.jsonl"
 led.write_text(led.read_text(encoding="utf-8").replace('"krw": 10000000.0', '"krw": 20000000.0'), encoding="utf-8")
 check("장부를 손대면 검증이 실패한다", run(MON, "verify", ok=False).returncode != 0)

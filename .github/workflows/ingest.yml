@@ -1,0 +1,31 @@
+name: order-window
+# 주문 창구: 운용자가 inbox/ 에 주문 요청을 올리면 바로 접수한다. 접수 시각 = 이 실행이 도는 시각.
+on:
+  push:
+    paths:
+      - 'inbox/**'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ledger
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 최신 장부 받기
+        run: git pull --rebase -q
+      - name: 주문 요청 접수
+        run: python broker/broker.py ingest
+      - name: 화면 자료
+        run: python broker/broker.py build
+      - name: 올리기
+        run: bash .github/commit.sh "주문 창구 $(TZ=Asia/Seoul date '+%m-%d %H:%M')"
