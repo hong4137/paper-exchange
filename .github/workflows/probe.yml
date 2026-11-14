@@ -1,5 +1,6 @@
 name: probe
 # 시세 원천이 GitHub 쪽에서 열리는지, 시험이 통과하는지 확인한다. 장부는 건드리지 않는다.
+# 손으로 돌리려면: 저장소 Actions 탭 → probe → Run workflow
 on:
   workflow_dispatch:
   push:
