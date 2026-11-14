@@ -1,0 +1,86 @@
+{
+ "name": "모의 거래소",
+ "updated": "2026-11-15T02:27:11+09:00",
+ "initial": 50000000,
+ "periods": [
+  {
+   "key": "w1",
+   "label": "최근 1주"
+  },
+  {
+   "key": "m1",
+   "label": "최근 1개월"
+  },
+  {
+   "key": "m3",
+   "label": "최근 3개월"
+  },
+  {
+   "key": "m6",
+   "label": "최근 6개월"
+  },
+  {
+   "key": "y1",
+   "label": "최근 1년"
+  },
+  {
+   "key": "ytd",
+   "label": "올해"
+  },
+  {
+   "key": "all",
+   "label": "처음부터"
+  }
+ ],
+ "players": [
+  {
+   "id": "hong4137",
+   "name": "hong4137",
+   "github": "hong4137",
+   "agent": null,
+   "opened": "2026-11-14",
+   "asof": "2026-11-14",
+   "total": 50000000,
+   "pnl_krw": 0,
+   "pnl_pct": 0.0,
+   "bench_pct": 0.0,
+   "excess_pct": 0.0,
+   "cash_pct": 100.0,
+   "n_positions": 0,
+   "n_orders": 0,
+   "n_filled": 0,
+   "fees_krw": 0,
+   "integrity_ok": true,
+   "returns": {
+    "ytd": {
+     "key": "ytd",
+     "label": "올해",
+     "from": "2026-11-14",
+     "to": "2026-11-14",
+     "pct": 0.0,
+     "bench_pct": 0.0,
+     "excess_pct": 0.0,
+     "from_open": true,
+     "late": true
+    },
+    "all": {
+     "key": "all",
+     "label": "처음부터",
+     "from": "2026-11-14",
+     "to": "2026-11-14",
+     "pct": 0.0,
+     "bench_pct": 0.0,
+     "excess_pct": 0.0,
+     "from_open": true,
+     "late": false
+    }
+   },
+   "max_drawdown_pct": 0.0,
+   "curve": [
+    50000000
+   ],
+   "rank": 1
+  }
+ ],
+ "contests": []
+}
