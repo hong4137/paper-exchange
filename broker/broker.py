@@ -413,7 +413,7 @@ def replay(events):
                 st["seen"].add(d["client_id"])
         elif t == "cancel":
             o = st["orders"][d["order"]]
-            o["status"], o["result"] = "canceled", {**(o["result"] or {}), "ts": e["ts"], "why": d["why"]}
+            o["status"], o["result"] = "canceled", {**(o["result"] or {}), "ts": e["ts"], "why": d["why"], "client_id": d.get("client_id")}
             if d.get("client_id"):
                 st["seen"].add(d["client_id"])
         elif t == "watch":                              # 값 조건 지켜보기 (주문을 내지 않고 알리기만)
@@ -1714,6 +1714,11 @@ def cmd_ingest(a):
             except Exception:
                 req, cid = {}, f.stem[:60]
             req.pop("account", None)
+            if req.get("dry_run"):                        # 검사만 (장부에 쓰지 않는다) — 에이전트 API 의 check
+                _save_check(acct["id"], cid, check_request({**req, "client_id": cid}))
+                print(f"  [{acct['id']}] {cid} — 검사만 했습니다")
+                f.unlink()
+                continue
             res, msg = handle_request(req, cid)
             if res != "dup":                              # 이미 처리한 요청(같은 파일이 다시 올라왔다)은 조용히 치운다
                 print(f"  [{acct['id']}] {cid} — {msg}")
@@ -1721,6 +1726,18 @@ def cmd_ingest(a):
             f.unlink()
     use(here)
     print(f"주문 창구: 접수 {n_ok}건, 받지 않음 {n_no}건")
+
+
+CHECKS_KEEP = 50
+
+
+def _save_check(acct_id, cid, result):
+    """검사만 한 결과를 docs/data/checks/{이름표}.json 에 남긴다 (최근 50건). 에이전트가 요청 번호로 찾아 읽는다."""
+    p = HOME / "docs" / "data" / "checks" / f"{acct_id}.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    old = json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
+    old = [x for x in old if x.get("client_id") != cid] + [{"client_id": cid, "at": now().isoformat(timespec="seconds"), **result}]
+    p.write_text(json.dumps(old[-CHECKS_KEEP:], ensure_ascii=False, indent=1), encoding="utf-8")
 
 
 MAX_PER_ISSUE = 10
@@ -1818,7 +1835,20 @@ def admin_do(cfg, req):
         else:
             cs.append(new)
         return f"'{name}' 대회를 {start} ~ {end or '끝 없음'} 으로 정했습니다"
-    raise Refused("모르는 관리 명령입니다 (add_player · remove_player · add_contest · remove_contest)")
+    if act in ("set_key", "revoke_key"):               # 에이전트 열쇠 — 문지기가 만들어 주인에게 한 번만 보여 주고, 여기에는 지문(sha256)만 온다
+        pid = str(req.get("id") or "").strip().lower()
+        cur = next((p for p in cfg.get("players") or [] if str(p.get("id") or p.get("github") or "").lower() == pid), None)
+        if not cur:
+            raise Refused(f"`{pid}` 은(는) 명단에 없습니다")
+        if act == "revoke_key":
+            cur.pop("api_keys", None)
+            return f"`{pid}` 의 에이전트 열쇠를 끊었습니다"
+        h = str(req.get("hash") or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", h):
+            raise Refused("열쇠 지문이 올바르지 않습니다")
+        cur["api_keys"] = [{"hash": h, "created": now().isoformat(timespec="seconds"), "label": str(req.get("label") or "")[:40]}]
+        return f"`{pid}` 의 에이전트 열쇠를 새로 달았습니다 (예전 열쇠는 끊김)"
+    raise Refused("모르는 관리 명령입니다 (add_player · remove_player · add_contest · remove_contest · set_key · revoke_key)")
 
 
 def cmd_admin_issue(author, body):

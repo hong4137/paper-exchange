@@ -13,6 +13,8 @@
 //   4. 주문 받기: /api/order → 저장소의 inbox/{계좌}/ 에 요청 파일을 올린다 (거래소의 주문 창구가 접수한다).
 //   5. 관리: /api/admin → 자료 저장소의 admin/ 에 요청 파일을 올린다 (거래소의 관리 창구가 처리하고 결과를 data/admin_log.json 에 남긴다).
 //   6. 시장 정보(주문 페이지): /api/market 시장 현황, /api/search?q= 종목 검색, /api/quote?symbol= 종목 현황 — market.mjs. 로그인한 참가자 누구나.
+//   7. 에이전트 입구 /api/v1/… — sharktalk 로그인 대신 계좌별 열쇠(Authorization: Bearer pxk_…). 열쇠 하나 = 계좌 하나, 자기 계좌만.
+//      열쇠는 관리자 화면에서 주인이 만든다(여기서 만들어 한 번만 보여 주고, 명단에는 sha256 지문만 남긴다). 쓰는 법은 에이전트-안내.md.
 //
 // 설정 (wrangler.jsonc 의 vars·services 와 wrangler secret)
 //   AUTH_SVC      sharktalk-auth 워커 (service binding)     AUTH_ME_URL  /me 주소      LOGIN_URL  로그인하러 갈 주소
@@ -192,7 +194,8 @@ export async function submitOrder(body, me, env, fetchFn = fetch, now = new Date
 
 const ADMIN_ACTIONS = { add_player: ['id', 'github', 'email', 'login', 'name', 'agent'], remove_player: ['id', 'github'],
                         add_contest: ['name', 'start', 'end'], remove_contest: ['name'],
-                        approve_fork: ['account', 'fork'], reject_fork: ['account', 'fork', 'why'] };
+                        approve_fork: ['account', 'fork'], reject_fork: ['account', 'fork', 'why'],
+                        set_key: ['id', 'hash', 'label'], revoke_key: ['id'] };
 
 /** 관리 명령을 자료 저장소의 admin/ 에 요청 파일로 올린다 (관리자만 부른다 — handle 이 확인한다). */
 export async function submitAdmin(body, env, fetchFn = fetch, now = new Date()) {
@@ -216,10 +219,141 @@ const deny = (status, msg) => new Response(
   `<body style="font-family:system-ui,sans-serif;background:#0b1120;color:#e8edf7;padding:40px 20px;text-align:center"><p>${msg}</p></body>`,
   { status, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } });
 
+// ---------- 7. 에이전트 입구 (/api/v1) ----------
+const KEY_RE = /^pxk_[A-Za-z0-9]{32,64}$/;
+const CID_RE = /^[A-Za-z0-9._:-]{1,60}$/;
+const V1_KEYS = ['action', 'order', 'why', 'ref', 'symbol', 'side', 'type', 'qty', 'krw', 'usd', 'price', 'session', 'valid_days',
+                 'when', 'value', 'watch', 'dry_run'];
+const rate = new Map();                                   // 열쇠 지문 → [분, 횟수] (워커 하나 안에서만 — 대략의 막이)
+const RATE_PER_MIN = 60;
+
+async function sha256hex(text) {
+  const d = await crypto.subtle.digest('SHA-256', te.encode(text));
+  return Array.from(new Uint8Array(d), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** 새 에이전트 열쇠 — 평문(한 번만 보여 준다)과 지문. */
+export async function newAgentKey() {
+  const abc = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  const raw = crypto.getRandomValues(new Uint8Array(40));
+  const key = 'pxk_' + Array.from(raw, (b) => abc[b % abc.length]).join('');
+  return { key, hash: await sha256hex(key) };
+}
+
+/** 열쇠로 계좌를 찾는다. 반환 {id, name} 또는 null. */
+export async function agentFromKey(request, cfg) {
+  const m = /^Bearer\s+(\S+)$/.exec(request.headers.get('Authorization') || '');
+  if (!m || !KEY_RE.test(m[1])) return null;
+  const h = await sha256hex(m[1]);
+  const p = (cfg.players || []).find((x) => (x.api_keys || []).some((k) => k.hash === h) && validId(accountId(x)));
+  return p ? { id: accountId(p), name: p.name || accountId(p), hash: h } : null;
+}
+
+function cleanRequest(body) {
+  const req = {};
+  for (const k of V1_KEYS) {
+    const v = body[k];
+    if (v === undefined || v === null || v === '') continue;
+    if (typeof v === 'string') req[k] = v.slice(0, k === 'why' ? 200 : 80);
+    else if (typeof v === 'number' && Number.isFinite(v)) req[k] = v;
+    else if (typeof v === 'boolean') req[k] = v;
+  }
+  if (body.action === 'fork') {                           // 분기 요청의 논거 글 (거래소가 다시 자른다)
+    const a = body.arguments;
+    if (typeof a === 'string') req.arguments = a.slice(0, 6000);
+    else if (a && typeof a === 'object' && !Array.isArray(a))
+      req.arguments = Object.fromEntries(Object.entries(a).slice(0, 5).filter(([, v]) => typeof v === 'string').map(([k, v]) => [k.slice(0, 40), v.slice(0, 6000)]));
+  }
+  return req;
+}
+
+async function readJsonFile(env, path, fetchFn) {
+  const r = await repoFile(env, path, fetchFn);
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error('read');
+  return r.json();
+}
+
+/** 요청 번호로 결과를 찾는다: 접수됨(주문·취소·지켜보기·분기) / 받지 않음 / 검사만 / 아직 창구에 / 모름. */
+export function requestStatus(cid, acct, checks, queued) {
+  const ch = (checks || []).find((x) => x.client_id === cid);
+  if (ch) return { client_id: cid, status: 'checked', result: ch };
+  const rf = (acct?.refused || []).find((x) => x.client_id === cid);
+  if (rf) return { client_id: cid, status: 'refused', why: rf.why, at: rf.ts };
+  const od = (acct?.orders || []).find((x) => x.client_id === cid);
+  if (od) return { client_id: cid, status: 'accepted', action: 'order', order: od };
+  const cn = (acct?.orders || []).find((x) => x.result && x.result.client_id === cid);
+  if (cn) return { client_id: cid, status: 'accepted', action: 'cancel', order: cn };
+  const w = (acct?.watches || []).find((x) => x.client_id === cid);
+  if (w) return { client_id: cid, status: 'accepted', action: 'watch', watch: w };
+  const f = (acct?.forks || []).find((x) => x.client_id === cid);
+  if (f) return { client_id: cid, status: 'accepted', action: 'fork', fork: f };
+  return { client_id: cid, status: queued ? 'queued' : 'unknown' };
+}
+
+async function handleAgent(request, env, fetchFn, url) {
+  const path = url.pathname;
+  let cfg;
+  try { cfg = await loadConfig(env, fetchFn); } catch (e) { return json({ error: '거래소 자료를 읽지 못했습니다' }, 502); }
+  const ag = await agentFromKey(request, cfg);
+  if (!ag) return json({ error: '열쇠가 없거나 맞지 않습니다 (Authorization: Bearer pxk_…)' }, 401);
+  const minute = Math.floor(Date.now() / 60000);
+  const [m0, n0] = rate.get(ag.hash) || [minute, 0];
+  const n = m0 === minute ? n0 + 1 : 1;
+  rate.set(ag.hash, [minute, n]);
+  if (n > RATE_PER_MIN) return json({ error: `요청이 너무 많습니다 (1분에 ${RATE_PER_MIN}번까지)` }, 429);
+  const get = request.method === 'GET';
+  try {
+    if (path === '/api/v1/account' && get) {
+      const a = await readJsonFile(env, `docs/data/accounts/${ag.id}.json`, fetchFn);
+      return a ? json(a) : json({ error: '아직 계좌 자료가 없습니다 (계좌를 연 뒤 첫 정기 실행에서 생깁니다)' }, 404);
+    }
+    if (path === '/api/v1/requests' && request.method === 'POST') {
+      if (!/^application\/json/i.test(request.headers.get('content-type') || '')) return json({ error: 'JSON 으로 보내 주세요' }, 400);
+      const text = await request.text();
+      if (text.length > 40000) return json({ error: '요청이 너무 깁니다' }, 400);
+      let body; try { body = JSON.parse(text); } catch (e) { body = null; }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return json({ error: '요청 내용을 읽을 수 없습니다' }, 400);
+      const req = cleanRequest(body);
+      const now = new Date();
+      if (typeof body.client_id === 'string' && !CID_RE.test(body.client_id)) return json({ error: 'client_id 는 영문·숫자·._:- 60자까지입니다' }, 400);
+      const stamp = now.toISOString().replace(/[-:.TZ]/g, '').slice(0, 17);
+      const rand = Array.from(crypto.getRandomValues(new Uint8Array(4)), (b) => b.toString(16).padStart(2, '0')).join('');
+      req.client_id = body.client_id || `api-${stamp}-${rand}`;
+      req.requested_at = now.toISOString();
+      const file = `inbox/${ag.id}/${req.client_id.replace(/:/g, '_')}.json`;
+      const r = await gh(env, `contents/${file}`, { method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ message: `요청 ${ag.id}`, branch: branch(env), content: bytesToB64(te.encode(JSON.stringify(req))) }) }, fetchFn);
+      if (r.status === 422) return json({ error: '같은 client_id 의 요청이 아직 창구에 있습니다' }, 409);
+      if (!r.ok) return json({ error: '거래소에 전하지 못했습니다. 잠시 뒤 다시 보내 주세요.' }, 502);
+      return json({ ok: true, client_id: req.client_id, status: 'queued',
+                    message: '창구에 올렸습니다. 보통 20~60초 뒤 /api/v1/requests/{client_id} 에서 결과를 볼 수 있습니다.' }, 202);
+    }
+    const rm = /^\/api\/v1\/requests\/([A-Za-z0-9._:-]{1,60})$/.exec(path);
+    if (rm && get) {
+      const cid = rm[1];
+      const [acct, checks, q] = await Promise.all([
+        readJsonFile(env, `docs/data/accounts/${ag.id}.json`, fetchFn),
+        readJsonFile(env, `docs/data/checks/${ag.id}.json`, fetchFn),
+        repoFile(env, `inbox/${ag.id}/${cid.replace(/:/g, '_')}.json`, fetchFn)]);
+      return json(requestStatus(cid, acct, checks, q.ok));
+    }
+    if (get && (path === '/api/v1/market' || path === '/api/v1/search' || path === '/api/v1/quote')) {
+      if (path === '/api/v1/market') return json(await market.overview(fetchFn));
+      if (path === '/api/v1/search') return json(await market.search(url.searchParams.get('q'), fetchFn));
+      return json(await market.quote(url.searchParams.get('symbol'), fetchFn));
+    }
+  } catch (e) {
+    return json({ error: /올바르지|아닙니다/.test(String(e.message)) ? e.message : '자료를 읽지 못했습니다. 잠시 뒤 다시 해 주세요.' }, 502);
+  }
+  return json({ error: '없는 주소이거나 보내는 방식이 다릅니다' }, 404);
+}
+
 /** next: 정적 파일(화면)을 그대로 내주는 함수. */
 export async function handle(request, env, next, fetchFn = fetch) {
   const url = new URL(request.url);
   const path = url.pathname;
+  if (path.startsWith('/api/v1/')) return handleAgent(request, env, fetchFn, url);   // 에이전트는 로그인 대신 열쇠
   const api = path.startsWith('/api/') || path.startsWith('/data/');
   const who = env.AUTH_SVC ? await verifySharktalk(request, env) : await verifyAccess(request, env, fetchFn);
   if (!who) {
@@ -248,6 +382,15 @@ export async function handle(request, env, next, fetchFn = fetch) {
     if (!body) return json({ error: '요청 내용을 읽을 수 없습니다' }, 400);
     if (path === '/api/admin') {
       if (!me.admin) return json({ error: '관리자만 할 수 있습니다' }, 403);
+      if (body.action === 'issue_key') {                  // 열쇠는 여기서 만들어 주인에게 한 번만 보여 준다 — 거래소에는 지문만 간다
+        const id = String(body.id || '').trim().toLowerCase();
+        if (!validId(id)) return json({ error: '이름표를 적어 주세요' }, 400);
+        const k = await newAgentKey();
+        const r = await submitAdmin({ action: 'set_key', id, hash: k.hash, label: String(body.label || '') }, env, fetchFn);
+        if (!r.ok) return json({ error: '거래소에 전하지 못했습니다' }, 502);
+        cfgCache = { at: 0, cfg: null };
+        return json({ ok: true, key: k.key, message: `${id} 의 열쇠입니다. 지금 한 번만 보여 줍니다 — 복사해 두세요. 1~2분 뒤부터 쓸 수 있고, 예전 열쇠는 끊깁니다.` });
+      }
       const r = await submitAdmin(body, env, fetchFn);
       if (r.ok) cfgCache = { at: 0, cfg: null };               // 명단이 곧 바뀐다 — 다음 요청 때 다시 읽는다
       return r.ok ? json({ ok: true, message: '관리 요청을 보냈습니다. 1~2분 뒤에 반영됩니다.' })

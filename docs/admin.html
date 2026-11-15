@@ -211,7 +211,7 @@ async function post(path, body){
   try{
     const r=await fetch(path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
     const j=await r.json().catch(()=>({}));
-    return {ok:r.ok, text:j.message||j.error||(r.ok?'보냈습니다.':'보내지 못했습니다.')};
+    return {ok:r.ok, text:j.message||j.error||(r.ok?'보냈습니다.':'보내지 못했습니다.'), key:j.key};
   }catch(e){ return {ok:false, text:'보내지 못했습니다. 잠시 뒤 다시 해 주세요.'}; }
 }
 async function whoAmI(){
@@ -230,7 +230,11 @@ async function manage(){
       <label>어떤 에이전트인지 (에이전트 계좌면 적기)<input name="agent" autocomplete="off"></label>
       <button type="submit" data-a="add_player">넣기 · 고치기</button>
       <button type="submit" data-a="remove_player" style="background:transparent;color:var(--dim);border:1px solid var(--line)">이 이름표 빼기</button>
-    </div><p class="msg" id="am"></p></form><div id="alog"></div></section>`;
+    </div><div class="row" style="margin-top:8px">
+      <button type="submit" data-a="issue_key" style="background:transparent;color:var(--txt);border:1px solid var(--line)">에이전트 열쇠 만들기</button>
+      <button type="submit" data-a="revoke_key" style="background:transparent;color:var(--dim);border:1px solid var(--line)">열쇠 끊기</button>
+      <span class="who" style="align-self:center">에이전트가 화면 없이 직접 주문하는 열쇠입니다. 이름표 칸만 적으면 됩니다. 새로 만들면 예전 열쇠는 끊깁니다.</span>
+    </div><p class="msg" id="am"></p><div id="akey"></div></form><div id="alog"></div></section>`;
   adminLog();
   const f=$('#af'); let act='add_player';
   f.querySelectorAll('button').forEach(b=>b.onclick=()=>{act=b.dataset.a;});
@@ -238,6 +242,16 @@ async function manage(){
     e.preventDefault();
     const v=n=>f.elements[n].value.trim(), msg=$('#am'), say=(t,c)=>{msg.textContent=t; msg.className='msg '+(c||'');};
     if(!v('id')) return say('이름표를 적어 주세요.','bad');
+    if(act==='issue_key'||act==='revoke_key'){
+      if(!confirm(v('id')+(act==='issue_key'?' 의 에이전트 열쇠를 새로 만들까요? 예전 열쇠는 끊깁니다.':' 의 에이전트 열쇠를 끊을까요?'))) return;
+      say('보내는 중입니다.');
+      const r=await post('api/admin',{action:act,id:v('id')});
+      say(r.text,r.ok?'ok':'bad');
+      $('#akey').innerHTML=r.key?`<div class="tblwrap" style="padding:10px 12px;margin-top:8px"><div class="who">${esc(v('id'))} 의 열쇠 — 지금 한 번만 보입니다. 복사해서 그 에이전트에게만 전하세요.</div>
+        <code style="display:block;margin-top:6px;word-break:break-all;user-select:all">${esc(r.key)}</code></div>`:'';
+      if(r.ok) setTimeout(adminLog,90*1000);
+      return;
+    }
     if(act==='add_player'&&v('who')&&!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v('who'))) return say('이메일 모양이 올바르지 않습니다.','bad');
     if(act==='add_player'&&!v('who')&&!v('agent')&&!(L&&(L.players||[]).some(p=>p.id===v('id').toLowerCase()))) return say('사람 참가자는 로그인 이메일을, 에이전트 계좌는 어떤 에이전트인지를 적어 주세요.','bad');
     const who=v('who')?{email:v('who')}:{};
