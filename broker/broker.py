@@ -6,7 +6,7 @@
 돈은 원화·달러 두 주머니다. 한국 주식은 원화로, 미국 주식은 달러로 사고판다 (판 돈도 달러로 남는다).
   달러가 모자란 미국 주식 매수는 모자란 만큼만 자동으로 환전한다 (config.json "usd_shortfall": "auto", 아니면 거부).
   비용(수수료·세금·환전)은 config.json "fees", 배당·액면분할은 시세 캐시의 events 를 보고 settle 이 장부에 적는다.
-장부 줄 종류: open · order · cancel · fill · reject · expire · refuse · fx(환전) · dividend(배당) · split(분할·병합).
+장부 줄 종류: open · order · cancel · fill · reject · expire · refuse · fx(환전) · dividend(배당) · split(분할·병합) · watch·unwatch(값 조건 지켜보기).
   옛 fill 줄(ccy·delta 가 없는 것)은 원화 한 주머니 시절 것으로 읽는다.
 
 참가자가 여럿이다 (config.json "players" — 주인이 넣은 GitHub 계정 명단). 계좌는 참가자마다 하나, 장부도 계좌마다 하나다.
@@ -31,6 +31,9 @@
   python broker/broker.py order --symbol USD --side sell --usd all         환전: 달러 예수금 전부를 원화로
   python broker/broker.py cancel --order O0001 --why ..
   python broker/broker.py daily                     시세 갱신 → 체결 → 화면 자료 만들기
+  python broker/broker.py check --json '{"symbol": "005930", "side": "buy", "qty": 1}'   보내지 않고 검사만 (끝 값 0 받음 · 3 안 받음)
+  python broker/broker.py quote --symbol 005930 [--krw 1000000]    거래소가 가진 값·호가 단위·상하한가·몇 주 (읽기만)
+  창구 요청 action: order(기본)·cancel·watch(값 조건 지켜보기)·unwatch. 지켜보기는 주문을 내지 않고 state.json watch_hits 에 알리기만 한다.
   python broker/broker.py status | verify
   python broker/broker.py ingest                    주문 창구(inbox/)에 들어온 요청을 접수한다
 
@@ -53,6 +56,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import prices as px  # noqa: E402
 import matching as mt  # noqa: E402
+import markets as mk  # noqa: E402
 
 KST = px.KST
 CODE_ROOT = Path(__file__).resolve().parent.parent
@@ -352,7 +356,8 @@ def replay(events):
           "realized": {}, "last_buy": {}, "last_buy_ts": {}, "refused": [], "seen": set(),
           "moves": [],                # 돈·수량이 움직인 모든 일 {date, krw, usd, symbol, qty} — 자산 곡선에 쓴다
           "costs": {"commission": 0.0, "tax": 0.0, "fx": 0.0},      # 낸 비용 (원화로)
-          "dividends": [], "div_by_order": {}, "splits": {}, "actions": set(), "us_gain": {}, "fx_log": []}
+          "dividends": [], "div_by_order": {}, "splits": {}, "actions": set(), "us_gain": {}, "fx_log": [],
+          "watches": {}}
     for e in events:
         t, d = e["type"], e["data"]
         if t == "open":
@@ -370,6 +375,15 @@ def replay(events):
         elif t == "cancel":
             o = st["orders"][d["order"]]
             o["status"], o["result"] = "canceled", {**(o["result"] or {}), "ts": e["ts"], "why": d["why"]}
+            if d.get("client_id"):
+                st["seen"].add(d["client_id"])
+        elif t == "watch":                              # 값 조건 지켜보기 (주문을 내지 않고 알리기만)
+            st["watches"][d["id"]] = {**d, "ts": e["ts"], "status": "watching", "result": None}
+            if d.get("client_id"):
+                st["seen"].add(d["client_id"])
+        elif t == "unwatch":
+            w = st["watches"][d["watch"]]
+            w["status"], w["result"] = "removed", {"ts": e["ts"], "why": d.get("why")}
             if d.get("client_id"):
                 st["seen"].add(d["client_id"])
         elif t in ("reject", "expire"):
@@ -764,6 +778,7 @@ def needed_keys(st, cfg):
     keys |= {s for s, l in st["lots"].items() if l}
     keys |= {o["symbol"] for o in st["orders"].values()}
     keys |= {m["symbol"] for m in st["moves"] if m["symbol"]}      # 판 뒤에 확인되는 배당도 있다
+    keys |= {w["symbol"] for w in st["watches"].values() if w["status"] == "watching"}
     return sorted(keys)
 
 
@@ -881,7 +896,30 @@ def build():
             order_pnl[o["id"]] = {"realized_krw": round(r), "unrealized_krw": round(u), "total_krw": round(r + u),
                                   "dividend_krw": round(st["div_by_order"].get(o["id"], 0.0))}
 
-    orders = [{**o, "name": name(o["symbol"])} for o in st["orders"].values()]
+    t_now = now()
+    orders = []
+    for o in st["orders"].values():
+        o = {**o, "name": name(o["symbol"]) if name(o["symbol"]) != o["symbol"] else (o.get("name") or o["symbol"])}
+        if o["status"] in OPEN:                        # 가장 빨리 체결될 수 있는 때 (접수 시각과 지금 중 늦은 쪽 뒤의 첫 1분)
+            base = max(datetime.fromisoformat(o["ts"]), t_now)
+            ef = mk.earliest_fill(o, base)
+            o["earliest_fill"] = ef.isoformat(timespec="minutes") if ef else None
+        orders.append(o)
+
+    # 지켜보는 조건 (주문을 내지 않고 알리기만)
+    watches = []
+    for w in st["watches"].values():
+        status, hit = watch_result(w, today)
+        watches.append({k: w.get(k) for k in ("id", "ref", "symbol", "name", "market", "when", "value", "valid_until",
+                                               "client_id", "requested_at", "ts")}
+                       | {"status": status, "hit": hit, "text": WATCH_WHEN[w["when"]].format(v=format(w["value"], ",g")),
+                          "removed": w["result"]})
+    watches.sort(key=lambda w: w["id"], reverse=True)
+
+    # 운용자가 주문 전에 볼 값 — 보유·대기·지켜보는 종목 (거래소가 가진 마지막 값, 원천에 다시 묻지 않는다)
+    qsyms = {p_["symbol"] for p_ in positions} | {o["symbol"] for o in orders if o["status"] in OPEN and o["symbol"] != px.FX_KEY} \
+        | {w["symbol"] for w in watches if w["status"] == "watching"}
+    quotes = {q: quote(q, cache=caches.get(q)) for q in sorted(qsyms)}
 
     # 흐름(최근 것부터)
     feed = []
@@ -940,6 +978,11 @@ def build():
             txt = f"취소 {d['order']} — {d['why']}"
         elif t == "refuse":
             txt = f"주문 요청을 받지 않았습니다 — {d['why']}"
+        elif t == "watch":
+            cond = WATCH_WHEN[d["when"]].format(v=format(d["value"], ",g"))
+            txt = f"지켜보기 {d['id']} — {d.get('name') or d['symbol']}: {cond} (~{d['valid_until']})"
+        elif t == "unwatch":
+            txt = f"지켜보기 {d['watch']} 를 거뒀습니다 — {d.get('why') or ''}"
         else:
             continue
         feed.append({"seq": e["seq"], "ts": e["ts"], "type": t, "text": txt})
@@ -990,6 +1033,14 @@ def build():
                       "broken_at": None if ok else n},
         "prices_asof": asof,
         "fx": fx_now,
+        "markets": {m: mk.status(m, t_now) for m in ("KR", "US", "FX")},
+        "next_run": {"exchange": mk.next_cron(t_now).isoformat(timespec="minutes"),
+                     "note": "매시 7분 정기 실행 (GitHub 예약은 몇 분~몇십 분 늦을 수 있다). 주문·취소 요청은 올라오면 1분 안팎에 따로 접수된다."},
+        "calendar": {"source": "holidays 0.108 의 KRX·NYSE 달력 (broker/markets.py)", "until": f"{max(mk.CAL_YEARS)}-12-31",
+                     "missing": "임시공휴일, 수능일·새해 첫날의 늦은 개장"},
+        "quotes": quotes,
+        "watches": watches,
+        "watch_hits": [w for w in watches if w["status"] == "hit"],
     }
     STATE_OUT.parent.mkdir(parents=True, exist_ok=True)
     STATE_OUT.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -1019,16 +1070,96 @@ class Refused(Exception):
     """주문을 받지 않는 이유."""
 
 
-def place_order(p):
+def symbol_info(sym, save=True):
+    """종목을 확인한다: 시세 캐시가 있으면 그것, 없으면 원천에서 받는다(save=True 면 캐시에 남긴다).
+    시세를 받을 수 없는 번호·기호면 Refused — 잘못 친 번호로 한 달 동안 체결 안 되는 주문이 걸려 있지 않게."""
+    c = px.load(HOME, sym)
+    if c and c.get("bars"):
+        return c
+    try:
+        if os.environ.get("PAPER_OFFLINE"):              # 시험: 원천에 묻지 않는다 (캐시에 없는 종목 = 받을 수 없는 종목)
+            raise OSError("offline")
+        if save:
+            c = px.update(HOME, sym, now())
+        elif px.market_of(sym) == "KR":
+            bars, name = px.fetch_daum(sym, now())
+            c = {"symbol": sym, "market": "KR", "name": name, "bars": bars}
+        else:
+            bars, name, _ = px.fetch_yahoo(sym, "US", now())
+            c = {"symbol": sym, "market": "US", "name": name, "bars": bars}
+    except Exception:
+        c = None
+    if not c or not c.get("bars"):
+        raise Refused(f"{sym} 의 시세를 받을 수 없습니다 — 종목 번호·기호를 확인해 주세요 (한국은 여섯 자리 번호, 미국은 기호). "
+                      "번호가 맞다면 시세 원천이 잠시 막힌 것이니 다시 내 주세요")
+    return c
+
+
+def tick_of(sym, live=False):
+    """호가 단위. 미국 0.01, 한국은 가장 최근 1분 시세에 찍힌 값에서 읽는다 (없으면 None, live=True 면 원천에서 받아 본다)."""
+    if px.market_of(sym) != "KR":
+        return 0.01
+    md = px.minute_dates(HOME, sym)
+    if md:
+        return mt.infer_tick("KR", px.load_minutes(HOME, sym, md[-1])["bars"])
+    if live:
+        try:
+            days, _ = px._naver_minutes(sym, now())
+            if days:
+                return mt.infer_tick("KR", days[max(days)])
+        except Exception:
+            pass
+    return None
+
+
+def quote(sym, cache=None, live=False, krw=None, usd=None):
+    """거래소가 가진 그 종목의 값 (주문 전에 묻기 — 장부에 아무것도 쓰지 않는다).
+    반환: symbol·name·market·currency·close(마지막 정규장 종가)·close_date·last(가장 최근 1분 값 {price, at, session, session_label})·
+    tick(호가 단위)·limit_up·limit_down(한국, 다음 정규장 기준 ±30%)·fx(미국이면 달러/원)·shares_for(금액을 주면 몇 주가 되는지)."""
+    c = cache if cache is not None else (symbol_info(sym, save=False) if live else px.load(HOME, sym))
+    if not c or not c.get("bars"):
+        return None
+    mkt = px.market_of(sym)
+    bar = c["bars"][-1]
+    lt = px.last_trade(HOME, sym)
+    if lt:
+        lt = {"price": lt["price"], "at": datetime.fromtimestamp(lt["ts"], KST).isoformat(timespec="minutes"),
+              "session": lt["session"], "session_label": mk.LABEL.get(lt["session"], lt["session"])}
+    out = {"symbol": sym, "name": c.get("name") or sym, "market": mkt, "currency": "USD" if mkt == "US" else "KRW",
+           "close": bar["c"], "close_date": bar["d"], "last": lt, "tick": tick_of(sym, live=live)}
+    if mkt == "KR":
+        tick = out["tick"] or 1
+        out["limit_up"] = math.floor(bar["c"] * 1.3 / tick) * tick
+        out["limit_down"] = math.ceil(bar["c"] * 0.7 / tick) * tick
+    rate = None
+    if mkt == "US":
+        f = px.load(HOME, px.FX_KEY)
+        rate = f["bars"][-1]["c"] if f and f.get("bars") else None
+        out["fx"] = rate
+    ref = (lt or {}).get("price") or bar["c"]
+    if krw or usd:
+        cfg = config()
+        load = 1 + buy_load(cfg, mkt)
+        if mkt == "US":
+            money = usd if usd else (krw / (rate * (1 + fx_spread(cfg))) if rate else None)
+        else:
+            money = krw
+        out["shares_for"] = {"krw": krw, "usd": usd, "price": ref,
+                             "qty": int(money // (ref * load)) if money else None,
+                             "note": "가장 최근 값과 매수 수수료(미국은 환전 비용도)로 어림한 것 — 실제 체결가는 주문 뒤 첫 1분 시세"}
+    return out
+
+
+def place_order(p, dry=False):
     """주문 하나를 검사해 장부에 접수한다. p: symbol, side, type, qty, krw, price, session, valid_days, ref, client_id, requested_at.
-    받지 않으면 Refused(이유)."""
+    받지 않으면 Refused(이유). dry=True 면 검사만 하고 장부에 쓰지 않는다 — 접수될 내용(dict)을 돌려준다."""
     cfg = config()
     st = replay(read_ledger())
     if st["opened"] is None:
         raise Refused("계좌가 없습니다")
     sym = str(p.get("symbol", "")).upper()
     if sym in ("USD", px.FX_KEY):
-        return place_fx_order(p, st, cfg)
+        return place_fx_order(p, st, cfg, dry=dry)
     side, typ, price = p.get("side"), p.get("type") or "market", p.get("price")
     session = p.get("session") or "regular"
     qty, krw_amt = p.get("qty"), p.get("krw")
@@ -1041,23 +1172,25 @@ def place_order(p):
         raise Refused("지정가·손절 주문에는 가격이 필요합니다.")
     if price is not None:
         price = float(price)
+    if not re.fullmatch(r"[A-Z0-9.\-]{1,12}", sym):
+        raise Refused("종목 기호가 올바르지 않습니다")
+    if side == "sell" and held(st, sym) == 0 and not any(o["status"] in OPEN and o["symbol"] == sym and o["side"] == "buy"
+                                                          for o in st["orders"].values()):
+        raise Refused(f"{sym} 을(를) 보유하고 있지 않습니다. 공매도는 없습니다.")
+    info = symbol_info(sym, save=not dry)
     if price is not None and mkt == "KR":
-        daily = px.load(HOME, sym)
-        md = px.minute_dates(HOME, sym)
-        if md:                                   # 호가 단위: 최근 시세에 실제로 찍힌 값들로 판단
-            tick = mt.infer_tick("KR", px.load_minutes(HOME, sym, md[-1])["bars"])
-            if price % tick:
-                raise Refused(f"호가 단위에 맞지 않습니다 — {sym} 은(는) {tick:,}원 단위입니다.")
+        daily = info
+        tick = tick_of(sym, live=dry)            # 호가 단위: 최근 시세에 실제로 찍힌 값들로 판단
+        if tick and price % tick:
+            raise Refused(f"호가 단위에 맞지 않습니다 — {sym} 은(는) {tick:,}원 단위입니다.")
         if daily and daily["bars"]:              # 상·하한가 (전일 종가의 ±30%)
             prev = daily["bars"][-1]["c"]
             if not prev * 0.7 <= price <= prev * 1.3:
                 raise Refused(f"가격이 상·하한가 범위를 벗어납니다 — 직전 종가 {prev:,.0f}원의 ±30% 안이어야 합니다.")
     if session == "all" and typ != "limit":
         raise Refused("장전·장후(시간외)에는 지정가 주문만 낼 수 있습니다. 시장가·손절·종가 주문은 정규장에서만 체결됩니다.")
-    if not re.fullmatch(r"[A-Z0-9.\-]{1,12}", sym):
-        raise Refused("종목 기호가 올바르지 않습니다")
-    data = {"ref": str(p.get("ref") or "")[:80], "symbol": sym, "market": mkt, "side": side, "type": typ,
-            "price": price, "session": session}
+    data = {"ref": str(p.get("ref") or "")[:80], "symbol": sym, "name": info.get("name") or sym, "market": mkt,
+            "side": side, "type": typ, "price": price, "session": session}
     if p.get("client_id"):
         data["client_id"] = p["client_id"]
         data["requested_at"] = p.get("requested_at")
@@ -1071,7 +1204,7 @@ def place_order(p):
         # 주문 가능 금액 확인 (실제 증권사처럼 접수 단계에서) — 수량 주문은 지정가나 직전 종가로 어림
         need = data.get("krw")
         if need is None:
-            daily = px.load(HOME, sym)
+            daily = info
             ref = price if typ == "limit" else (daily["bars"][-1]["c"] if daily and daily["bars"] else None)
             if ref is not None:
                 rate = 1.0
@@ -1099,11 +1232,13 @@ def place_order(p):
     days = int(p.get("valid_days") or cfg["order_valid_days"])
     data["valid_until"] = (now().date() + timedelta(days=days)).isoformat()
     data["id"] = f"O{len(st['orders']) + 1:04d}"
+    if dry:
+        return data
     append("order", data)
     return data["id"]
 
 
-def place_fx_order(p, st, cfg):
+def place_fx_order(p, st, cfg, dry=False):
     """환전 주문 접수. 사기 = 원화를 달러로(원화 금액 krw 또는 달러 금액 usd), 팔기 = 달러를 원화로(usd 금액 또는 all)."""
     side, usd, krw_amt = p.get("side"), p.get("usd"), p.get("krw")
     if side not in ("buy", "sell") or (p.get("type") or "market") != "market" or p.get("price") is not None \
@@ -1137,8 +1272,150 @@ def place_fx_order(p, st, cfg):
     days = int(p.get("valid_days") or cfg["order_valid_days"])
     data["valid_until"] = (now().date() + timedelta(days=days)).isoformat()
     data["id"] = f"O{len(st['orders']) + 1:04d}"
+    if dry:
+        return data
     append("order", data)
     return data["id"]
+
+
+WATCH_WHEN = {"close_below": "정규장 종가가 {v} 아래", "close_above": "정규장 종가가 {v} 위",
+              "price_below": "정규장 1분 값이 {v} 아래로", "price_above": "정규장 1분 값이 {v} 위로"}
+WATCH_MAX = 50
+
+
+def place_watch(p, dry=False):
+    """값 조건 지켜보기 등록. p: symbol, when(close_below·close_above·price_below·price_above), value, ref, valid_days.
+    주문을 내지 않는다 — 정기 실행이 확인해 state.json 의 watch_hits 에 올린다."""
+    st = replay(read_ledger())
+    if st["opened"] is None:
+        raise Refused("계좌가 없습니다")
+    sym = str(p.get("symbol", "")).upper()
+    when = p.get("when")
+    if when not in WATCH_WHEN:
+        raise Refused("지켜볼 조건은 close_below·close_above·price_below·price_above 중 하나입니다")
+    try:
+        value = float(p.get("value"))
+    except (TypeError, ValueError):
+        raise Refused("지켜볼 값(value)이 숫자가 아닙니다")
+    if not math.isfinite(value) or value <= 0:
+        raise Refused("지켜볼 값(value)이 올바르지 않습니다")
+    if not re.fullmatch(r"[A-Z0-9.\-]{1,12}", sym) or sym in ("USD", px.FX_KEY):
+        raise Refused("종목 기호가 올바르지 않습니다 (환율은 지켜볼 수 없습니다)")
+    if px.market_of(sym) not in config()["markets"]:
+        raise Refused(f"{px.market_of(sym)} 시장은 허용되지 않습니다.")
+    if sum(w["status"] == "watching" for w in st["watches"].values()) >= WATCH_MAX:
+        raise Refused(f"지켜보는 조건은 {WATCH_MAX}개까지입니다 — 필요 없는 것을 먼저 거둬 주세요")
+    info = symbol_info(sym, save=not dry)
+    days = int(p.get("valid_days") or 90)
+    data = {"id": f"W{len(st['watches']) + 1:04d}", "ref": str(p.get("ref") or "")[:80], "symbol": sym,
+            "name": info.get("name") or sym, "market": px.market_of(sym), "when": when, "value": value,
+            "valid_until": (now().date() + timedelta(days=days)).isoformat()}
+    if p.get("client_id"):
+        data["client_id"] = p["client_id"]
+        data["requested_at"] = p.get("requested_at")
+    if dry:
+        return data
+    append("watch", data)
+    return data["id"]
+
+
+def watch_result(w, today):
+    """지켜보는 조건이 닿았는지 시세 캐시로 확인한다 (등록 뒤의 시세만). 반환 (상태, 닿은 때 dict 또는 None).
+    닿은 것은 다시 계산해도 같은 첫 순간이 나온다 (1분 시세 파일이 저장소에 쌓이므로)."""
+    if w["status"] != "watching":
+        return w["status"], None
+    t0 = datetime.fromisoformat(w["ts"]).timestamp()
+    below = w["when"].endswith("_below")
+    hit = (lambda x: x < w["value"]) if below else (lambda x: x > w["value"])
+    if w["when"].startswith("close_"):
+        c = px.load(HOME, w["symbol"])
+        for b in (c or {}).get("bars", []):
+            ss = mk.sessions(w["market"], datetime.strptime(b["d"], "%Y-%m-%d").date())
+            close = next((e for n, s_, e in ss if n == "r"), None)
+            if close and close.timestamp() > t0 and hit(b["c"]):
+                return "hit", {"at": close.isoformat(timespec="minutes"), "price": b["c"], "date": b["d"]}
+    else:
+        start = datetime.fromtimestamp(t0, KST).date() - timedelta(days=1)
+        for d in px.minute_dates(HOME, w["symbol"]):
+            if d < start.isoformat():
+                continue
+            for bar in px.load_minutes(HOME, w["symbol"], d)["bars"]:
+                ses = bar[6] if len(bar) > 6 else "r"
+                if bar[0] < t0 or ses != "r":
+                    continue
+                x = bar[3] if below else bar[2]
+                if hit(x):
+                    return "hit", {"at": datetime.fromtimestamp(bar[0], KST).isoformat(timespec="minutes"), "price": x, "date": d}
+    if w["valid_until"] < today:
+        return "expired", None
+    return "watching", None
+
+
+def check_request(req):
+    """요청 하나(창구 파일과 같은 모양)를 거래소 규칙으로 검사만 한다 — 장부에 아무것도 쓰지 않는다.
+    반환 {"ok": True, "action", "would": 접수될 내용, "earliest_fill"} 또는 {"ok": False, "why"}."""
+    act = req.get("action", "order")
+    try:
+        st = replay(read_ledger())
+        if req.get("client_id") and req["client_id"] in st["seen"]:
+            raise Refused("이미 처리한 요청입니다 (같은 client_id)")
+        if act == "cancel":
+            o = st["orders"].get(req.get("order"))
+            if not o or o["status"] not in OPEN:
+                raise Refused(f"취소할 수 없는 주문입니다 ({req.get('order')})")
+            return {"ok": True, "action": act, "would": {"order": o["id"], "status_now": o["status"]}}
+        if act == "unwatch":
+            w = st["watches"].get(req.get("watch"))
+            if not w or w["status"] != "watching":
+                raise Refused(f"거둘 수 없는 지켜보기입니다 ({req.get('watch')})")
+            return {"ok": True, "action": act, "would": {"watch": w["id"]}}
+        if act == "watch":
+            return {"ok": True, "action": act, "would": place_watch(req, dry=True)}
+        if act != "order":
+            raise Refused("모르는 요청입니다 (order·cancel·watch·unwatch)")
+        try:
+            data = place_order(req, dry=True)
+        except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
+            raise Refused("주문 내용이 올바르지 않습니다")
+        ef = mk.earliest_fill(data, now())
+        return {"ok": True, "action": act, "would": data, "earliest_fill": ef.isoformat(timespec="minutes") if ef else None}
+    except Refused as e:
+        return {"ok": False, "action": act, "why": str(e)}
+
+
+def cmd_check(a):
+    """보내지 않고 검사만: --json '{요청}' (창구 파일과 같은 모양) 또는 order 와 같은 칸.
+    출력 JSON 한 줄. 끝나는 값 0 = 받을 수 있음, 3 = 받지 않음."""
+    if a.json:
+        try:
+            req = json.loads(a.json)
+            assert isinstance(req, dict)
+        except Exception:
+            print(json.dumps({"ok": False, "why": "요청을 JSON 으로 읽을 수 없습니다"}, ensure_ascii=False))
+            sys.exit(3)
+    else:
+        req = {k: v for k, v in {"symbol": a.symbol, "side": a.side, "type": a.type, "qty": a.qty, "krw": a.krw, "usd": a.usd,
+                                 "price": a.price, "session": a.session, "valid_days": a.valid_days, "ref": a.ref}.items()
+               if v is not None}
+    r = check_request(req)
+    print(json.dumps(r, ensure_ascii=False))
+    sys.exit(0 if r["ok"] else 3)
+
+
+def cmd_quote(a):
+    """주문 전에 물어볼 값 (읽기만). 캐시에 없는 종목은 원천에서 받아 보되 저장하지 않는다.
+    출력 JSON 한 줄. 끝나는 값 0 = 찾음, 3 = 시세를 받을 수 없는 종목."""
+    sym = a.symbol.upper()
+    try:
+        has = px.load(HOME, sym)
+        q = quote(sym, live=not (has and has.get("bars")), krw=a.krw, usd=a.usd)
+    except Refused as e:
+        print(json.dumps({"ok": False, "symbol": sym, "why": str(e)}, ensure_ascii=False))
+        sys.exit(3)
+    if not q:
+        print(json.dumps({"ok": False, "symbol": sym, "why": "시세가 없습니다"}, ensure_ascii=False))
+        sys.exit(3)
+    print(json.dumps({"ok": True, **q}, ensure_ascii=False))
 
 
 def cmd_order(a):
@@ -1165,6 +1442,20 @@ def handle_request(req, cid):
                 raise Refused(f"취소할 수 없는 주문입니다 ({req.get('order')})")
             append("cancel", {"order": o["id"], "why": str(req.get("why") or "운용자 요청")[:200], "client_id": cid})
             return "ok", f"주문 {o['id']} 취소를 접수했습니다"
+        if req.get("action") == "watch":
+            try:
+                wid = place_watch(req)
+            except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
+                raise Refused("지켜보기 요청 내용이 올바르지 않습니다")
+            return "ok", f"조건 지켜보기를 등록했습니다 — {wid}"
+        if req.get("action") == "unwatch":
+            w = st["watches"].get(req.get("watch"))
+            if not w or w["status"] != "watching":
+                raise Refused(f"거둘 수 없는 지켜보기입니다 ({req.get('watch')})")
+            append("unwatch", {"watch": w["id"], "why": str(req.get("why") or "운용자 요청")[:200], "client_id": cid})
+            return "ok", f"지켜보기 {w['id']} 를 거뒀습니다"
+        if req.get("action", "order") != "order":
+            raise Refused("모르는 요청입니다 (order·cancel·watch·unwatch)")
         try:
             oid = place_order(req)
         except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
@@ -1445,6 +1736,7 @@ def cmd_update(a):
         keys |= set(needed_keys(st, cfg))
         # 1분 시세: 살아 있는 주문·보유 종목만 (체결 계산에 쓰인다). 미국 종목이나 달러가 있으면 환율도.
         mine = {o["symbol"] for o in st["orders"].values() if o["status"] in OPEN} | {s for s, l in st["lots"].items() if l}
+        mine |= {w["symbol"] for w in st["watches"].values() if w["status"] == "watching" and w["when"].startswith("price_")}
         if any(px.market_of(k) == "US" for k in mine) or st["usd"] >= 0.01:
             mine.add(px.FX_KEY)
         need |= mine
@@ -1541,6 +1833,15 @@ def main():
     s.set_defaults(f=cmd_order)
     s = sub.add_parser("cancel"); s.add_argument("--order", required=True); s.add_argument("--why", required=True)
     s.set_defaults(f=cmd_cancel)
+    s = sub.add_parser("check")                                            # 보내지 않고 검사만 (읽기 전용)
+    s.add_argument("--json"); s.add_argument("--ref"); s.add_argument("--symbol")
+    s.add_argument("--side", choices=["buy", "sell"]); s.add_argument("--type", choices=["market", "moc", "limit", "stop"])
+    s.add_argument("--qty"); s.add_argument("--krw", type=float); s.add_argument("--price", type=float); s.add_argument("--usd")
+    s.add_argument("--valid-days", type=int, dest="valid_days"); s.add_argument("--session", choices=["regular", "all"])
+    s.set_defaults(f=cmd_check)
+    s = sub.add_parser("quote")                                            # 주문 전에 물어볼 값 (읽기 전용)
+    s.add_argument("--symbol", required=True); s.add_argument("--krw", type=float); s.add_argument("--usd", type=float)
+    s.set_defaults(f=cmd_quote)
     sub.add_parser("ingest").set_defaults(f=cmd_ingest)
     sub.add_parser("issue").set_defaults(f=cmd_issue)
     sub.add_parser("admin-inbox").set_defaults(f=cmd_admin_inbox)

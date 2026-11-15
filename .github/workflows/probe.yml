@@ -27,9 +27,17 @@ jobs:
           python tests/test_intraday.py
           python tests/test_money.py
           python tests/test_league.py
+          python tests/test_operator.py
           node tests/test_site.mjs
           node tests/test_market.mjs
       - name: 시세 원천 열리는지
         run: python tests/probe_sources.py
       - name: 주문 페이지 시세 원천
         run: node tests/probe_market.mjs
+      - name: 종목 확인·값 묻기가 실제 원천으로 되는지 (빈 임시 폴더, 아무것도 올리지 않는다)
+        run: |
+          export PAPER_HOME=$(mktemp -d) && cp config.json "$PAPER_HOME/"
+          python broker/broker.py quote --symbol 000660 --krw 1000000
+          python broker/broker.py quote --symbol AAPL --usd 1000
+          if python broker/broker.py quote --symbol 999999; then echo "::error::없는 번호가 통과했습니다"; exit 1; fi
+          echo "없는 번호는 받지 않음 (정상)"
