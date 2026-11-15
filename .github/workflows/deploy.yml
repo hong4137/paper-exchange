@@ -39,6 +39,7 @@ jobs:
       - name: 문지기·시세 시험
         run: |
           node tests/test_site.mjs
+          node tests/test_agent_api.mjs
           node tests/test_market.mjs
       - name: 열쇠가 있는지
         id: key
@@ -70,7 +71,7 @@ jobs:
         run: |
           sleep 10
           bad=0
-          for path in / /index.html /trade.html /admin.html /data/league.json /data/state.json /api/me /api/market "/api/quote?symbol=005930"; do
+          for path in / /index.html /trade.html /admin.html /data/league.json /data/state.json /api/me /api/market "/api/quote?symbol=005930" /api/v1/account /api/v1/market; do
             code=""
             for i in 1 2 3; do
               code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$SITE$path") && [ -n "$code" ] && [ "$code" != "000" ] && break

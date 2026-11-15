@@ -190,6 +190,37 @@ put("admin", "z1", {"action": "add_player", "id": "p2", "name": "신중한 2호"
 run("2026-11-19T16:20:00", "admin-inbox")
 check("이름표는 그대로, 화면 이름만 바뀐다", next(p for p in roster() if p.get("id") == "p2")["name"] == "신중한 2호")
 
+print("에이전트 열쇠 (지문만 명단에)")
+H = "ab" * 32
+put("admin", "k1", {"action": "set_key", "id": "p2", "hash": H, "label": "선수"})
+put("admin", "k2", {"action": "set_key", "id": "p2", "hash": "zz"})
+put("admin", "k3", {"action": "set_key", "id": "nobody", "hash": H})
+run("2026-11-19T16:30:00", "admin-inbox")
+run("2026-11-19T16:31:00", "build")
+log = json.loads((tmp / "docs" / "data" / "admin_log.json").read_text(encoding="utf-8"))
+p2 = next(p for p in roster() if p.get("id") == "p2")
+check("열쇠 지문이 명단에 붙고, 이상한 지문·없는 계좌는 하지 않는다", p2["api_keys"][0]["hash"] == H and [x["ok"] for x in log[-3:]] == [True, False, False], log[-3:])
+blob = "".join(f.read_text(encoding="utf-8") for f in (tmp / "docs" / "data").rglob("*.json"))
+check("열쇠 지문은 화면 자료(state·league·계좌)에 실리지 않는다", H not in blob and "api_keys" not in blob)
+put("admin", "k4", {"action": "revoke_key", "id": "p2"})
+run("2026-11-19T16:32:00", "admin-inbox")
+check("열쇠 끊기", "api_keys" not in next(p for p in roster() if p.get("id") == "p2"))
+
+print("검사만 (dry_run 요청 — 에이전트 API)")
+n = len(ledger("p2"))
+put("inbox/p2", "d1", {"client_id": "d1", "symbol": "005930", "side": "buy", "qty": 1, "dry_run": True})
+put("inbox/p2", "d2", {"client_id": "d2", "symbol": "005930", "side": "buy", "qty": 100000, "dry_run": True})
+run("2026-11-19T16:40:00", "ingest")
+chk = {x["client_id"]: x for x in json.loads((tmp / "docs" / "data" / "checks" / "p2.json").read_text(encoding="utf-8"))}
+check("검사 결과가 checks/{이름표}.json 에 남고 장부는 그대로", chk["d1"]["ok"] and not chk["d2"]["ok"] and "모자랍니다" in chk["d2"]["why"]
+      and len(ledger("p2")) == n and not list((tmp / "inbox" / "p2").glob("*.json")), chk)
+put("inbox/p2", "c8", {"client_id": "c8", "symbol": "005930", "side": "buy", "qty": 1, "type": "limit", "price": 80000})
+put("inbox/p2", "c9", {"client_id": "c9", "action": "cancel", "order": "O0003", "why": "시험"})
+run("2026-11-19T16:41:00", "ingest")
+run("2026-11-19T16:41:00", "build")
+o3 = next(o for o in acct("p2")["orders"] if o["id"] == "O0003")
+check("취소 요청 번호가 그 주문의 결과에 남는다 (요청 결과 찾기용)", o3["status"] == "canceled" and o3["result"]["client_id"] == "c9", o3)
+
 print("자기 계좌만 받아 간 폴더 (형제 가리기)")
 mine = Path(tempfile.mkdtemp(prefix="paper_mine_"))
 for rel in ("accounts/p2", "data", "docs/data/accounts/p2.json"):

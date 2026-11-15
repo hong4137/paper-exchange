@@ -76,6 +76,8 @@ site/worker.mjs       sharktalk 쪽에서 모든 요청을 먼저 받는 문 —
 site/lib.mjs          문지기: sharktalk 로그인 확인, 자기 계좌 자료만 내주기, 주문 양식 → inbox/{이름표}/, 관리 양식 → [관리] 이슈, 시장 정보(/api/market·search·quote)
 site/market.mjs       주문 페이지의 시장 정보 — 볼 때마다 네이버·야후에서 바로 가져온다(30초 기억). 참고용, 체결과는 무관
 tests/test_site.mjs   문지기 시험 (가짜 로그인 열쇠·가짜 저장소, node 로 돈다)
+tests/test_agent_api.mjs 에이전트 입구 시험 (열쇠·자기 계좌만·요청 올리기·결과 찾기·발급·횟수 막이)
+에이전트-안내.md      에이전트(친구들 것 포함)가 열쇠로 직접 주문하는 법 — 주소·요청 모양·결과·예시
 tests/test_market.mjs 시장 정보 시험 (가짜 원천 응답) / tests/probe_market.mjs 실제 원천이 어떤 모양으로 답하는지 찍는다 (GitHub 확인 실행)
 docs/data/demo.json   화면 확인용 자료 (index.html?demo). tests/make_demo_real.py 로 다시 만든다
 tests/test_broker.py  장부·종가 주문·산 주문별 손익 시험 — 임시 폴더·가짜 가격으로만 돈다
@@ -150,6 +152,20 @@ retired/              (엔진) 쓰지 않게 된 이슈 창구·이슈 양식·�
   받을 것: `accounts/{이름표}/`, `docs/data/accounts/{이름표}.json`, `inbox/{이름표}/`, `data/`, `.ledger-lock`. 명단(`players.json`)·다른 계좌·`league.json`·`forks/` 는 받지 않는다.
   명단 파일이 없는 폴더에서도 `--account {이름표}` 의 읽기 명령(`status`·`check`·`quote`)이 된다(`pick()` — 그 계좌 폴더만 있으면). 쓰는 명령은 `.ledger-lock` 으로 잠긴다.
   **약속이지 잠금은 아니다** — 같은 GitHub 열쇠로는 다른 파일도 받을 수 있다. 진짜로 막으려면 계좌별 열쇠(문지기)가 필요하다 — 필요해지면 사용자에게 묻는다.
+
+### 에이전트 입구 — 열쇠로 직접 주문 (사용자 결정 2026-11-15)
+사용자: "친구들의 다른 에이전트도 브라우저가 아니라 직접 주문하고 관리할 수 있어야 한다. 저장소를 열어 줄 수는 없고 MCP 는 만만치 않다."
+→ 결정: 문지기에 HTTP 입구 `/api/v1/…` + **계좌별 열쇠**(관리자 화면에서 주인이 발급) · 친구(사람)도 sharktalk 로그인으로 화면을 본다 · 우리 선수도 이 길로 옮긴다 · MCP 는 나중에(이 API 를 감싸면 된다).
+- **열쇠**: `pxk_` + 40자. 문지기(`newAgentKey`)가 만들어 주인 화면에 **한 번만** 보여 주고, 거래소에는 `admin/` `{"action": "set_key", "id", "hash", "label"}` 로 sha256 지문만 간다 → `players.json` 의 `players[].api_keys = [{hash, created, label}]`.
+  새로 만들면 예전 열쇠는 끊긴다. `revoke_key {id}` 로 끊는다. 지문은 화면 자료(state·league·계좌)에 실리지 않는다. 평문 열쇠는 저장소·장부·대화 어디에도 남기지 않는다.
+- **입구**(`site/lib.mjs` `handleAgent` — sharktalk 로그인과 따로, `Authorization: Bearer pxk_…` 만 본다. 1분 60번까지, 워커 안에서 대략):
+  `GET /api/v1/account`(자기 `docs/data/accounts/{이름표}.json` 그대로) · `POST /api/v1/requests`(창구 요청과 같은 모양 → 자기 `inbox/{이름표}/{client_id}.json`, 202) ·
+  `GET /api/v1/requests/{client_id}`(`queued`·`accepted`·`refused`·`checked`·`unknown`) · `GET /api/v1/search|quote|market`(주문 페이지와 같은 시장 정보).
+  요청 안의 계좌 이름은 보지 않는다 — 열쇠의 계좌다. 쓰는 법은 `에이전트-안내.md`(공개 저장소에 있어도 되는 글 — 열쇠는 없다).
+- **검사만**: 요청에 `"dry_run": true` → 거래소가 창구에서 `check_request` 만 하고 `docs/data/checks/{이름표}.json`(최근 50건)에 남긴다. 장부에는 쓰지 않는다.
+- 취소 줄의 요청 번호는 그 주문의 `result.client_id` 에 남는다(요청 결과 찾기용).
+- **친구 계좌**: 관리자 화면 "참가자 관리"에서 이름표·화면 이름·에이전트(+ 사람이 볼 거면 sharktalk 로그인 이메일 — sharktalk 계정은 주인이 sharktalk 쪽에서 만들어 준다) → "에이전트 열쇠 만들기".
+- 진짜 막힘이다: 열쇠로는 자기 계좌와 시장 정보 말고 아무것도 열리지 않는다. 그래서 형제 가리기도 이 길로 옮기면 "약속"이 아니라 잠금이 된다.
 
 ### 화면은 sharktalk 로, 로그인은 sharktalk 로그인으로 (사용자 결정 2026-11-14 — 2026-11-15 올림, 지금 상태는 `RESUME.md`)
 사용자: 관리자 화면은 "진짜 로그인(저장소 비공개)"으로 잠근다 → "결국 사이트는 sharktalk 로 서빙해야 한다" → "sharktalk 는 그것(바둑 사이트) 말고도 엄청나게 많다."
