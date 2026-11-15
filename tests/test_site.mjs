@@ -42,8 +42,7 @@ const fetchFn = async (url, init = {}) => {
     const f = files[decodeURIComponent(m[1].slice(9).split('?')[0])];
     return f ? Response.json(f) : new Response('없음', { status: 404 });
   }
-  if (init.method === 'PUT' && m[1].startsWith('contents/inbox/')) return Response.json({ ok: true }, { status: 201 });
-  if (init.method === 'POST' && m[1] === 'issues') return Response.json({ number: 7 }, { status: 201 });
+  if (init.method === 'PUT' && /^contents\/(inbox|admin)\//.test(m[1])) return Response.json({ ok: true }, { status: 201 });
   return new Response('?', { status: 500 });
 };
 const site = 'https://ex.pages.dev';
@@ -110,16 +109,18 @@ check('정해진 모양이 아닌 주문은 받지 않는다', (await call('/api
 
 console.log('관리');
 r = await call('/api/admin', 'alice@example.com', { method: 'POST', body: { action: 'add_player', id: 'carol' } });
-check('참가자는 관리 명령을 낼 수 없다', r.status === 403 && !calls.some((c) => c.init.method === 'POST'));
+check('참가자는 관리 명령을 낼 수 없다', r.status === 403 && !calls.some((c) => c.init.method === 'PUT'));
 r = await call('/api/admin', 'boss@example.com', { method: 'POST', body: { action: 'add_player', id: 'carol', email: 'carol@example.com', name: '캐럴', extra: 'x' } });
-const post = calls.find((c) => c.init.method === 'POST');
-const issue = post ? JSON.parse(post.init.body) : {};
-check('관리자의 명령은 "[관리]" 이슈로 거래소에 넘어간다', r.status === 200 && issue.title === '[관리] add_player'
-      && issue.body.includes('"email":"carol@example.com"') && !issue.body.includes('extra'), JSON.stringify(issue));
+const aput = calls.find((c) => c.init.method === 'PUT');
+const adminReq = aput ? JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(JSON.parse(aput.init.body).content), (c) => c.charCodeAt(0)))) : {};
+check('관리자의 명령은 자료 저장소의 admin/ 에 요청 파일로 넘어간다 (이슈를 열지 않는다)', r.status === 200 && /\/contents\/admin\/[0-9a-f]+-[0-9a-f]{8}\.json$/.test(aput.url)
+      && adminReq.action === 'add_player' && adminReq.email === 'carol@example.com' && !('extra' in adminReq) && adminReq.requested_at
+      && !calls.some((c) => c.init.method === 'POST'), JSON.stringify(adminReq));
+check('관리 요청의 결과는 관리자만 본다', canRead('/data/admin_log.json', { admin: true }) && !canRead('/data/admin_log.json', { admin: false, id: 'alice' }));
 check('모르는 관리 명령은 넘기지 않는다', (await call('/api/admin', 'boss@example.com', { method: 'POST', body: { action: 'drop_all' } })).status === 400);
 check('명단 판단 (직접)', whoami('nobody@example.com', config, env).id === null && whoami('boss@example.com', config, env).main === true);
 r = await call('/api/admin', 'boss@example.com', { method: 'POST', body: { action: 'add_player', id: 'dan', login: 'dan-st' } });
-check('참가자를 sharktalk 아이디로도 넣을 수 있다', r.status === 200 && JSON.parse(calls.find((c) => c.init.method === 'POST').init.body).body.includes('"login":"dan-st"'));
+check('참가자를 sharktalk 아이디로도 넣을 수 있다', r.status === 200 && atob(JSON.parse(calls.find((c) => c.init.method === 'PUT').init.body).content).includes('"login":"dan-st"'));
 
 console.log('sharktalk 로그인 (인증 워커의 /me 에 쿠키를 넘겨 묻는다)');
 // 실제 sharktalk-auth 의 /me: 로그인 됨 = 200 { authenticated: true, user: { email, name, role } }, 안 됨 = 401 { authenticated: false }
@@ -131,7 +132,7 @@ const sessions = { 'st_session=boss': { authenticated: true, user: { email: 'Bos
 let asked = [];
 const stEnv = { GITHUB_REPO: 'owner/repo', GITHUB_TOKEN: 'tok', ADMIN_EMAILS: 'boss@example.com', LOGIN_URL: 'https://auth.sharktalk.co.kr/login',
   AUTH_SVC: { fetch: async (req) => { asked.push(req.url); const s = sessions[req.headers.get('cookie')]; return s ? Response.json(s) : Response.json({ authenticated: false }, { status: 401 }); } } };
-files['config.json'] = { players: [...config.players, { id: 'carl', name: '칼', login: 'carl' }] };
+files['players.json'] = { players: [...config.players, { id: 'carl', name: '칼', login: 'carl' }] };   // 자료 저장소의 명단이 config.json 보다 먼저
 _resetCaches();
 const st = async (path, cookie, init = {}) => {
   const res = await handle(new Request(site + path, { ...init, headers: { ...(cookie ? { Cookie: cookie } : {}), ...(init.headers || {}) } }), stEnv, async () => new Response('화면'), fetchFn);

@@ -14,7 +14,7 @@
   "services": [{ "binding": "AUTH_SVC", "service": "sharktalk-auth" }],
   // 비밀이 아닌 설정. 비밀(GITHUB_TOKEN, ADMIN_EMAILS)은 여기 적지 않고 wrangler secret 으로 넣는다.
   "vars": {
-    "GITHUB_REPO": "hong4137/paper-exchange",
+    "GITHUB_REPO": "hong4137/paper-exchange-data",
     "GITHUB_BRANCH": "main",
     "AUTH_ME_URL": "https://auth.sharktalk.co.kr/me",
     "LOGIN_URL": "https://auth.sharktalk.co.kr/login"

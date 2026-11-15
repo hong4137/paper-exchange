@@ -230,7 +230,8 @@ async function manage(){
       <label>어떤 에이전트인지 (없어도 됨)<input name="agent" autocomplete="off"></label>
       <button type="submit" data-a="add_player">넣기 · 고치기</button>
       <button type="submit" data-a="remove_player" style="background:transparent;color:var(--dim);border:1px solid var(--line)">이 이름표 빼기</button>
-    </div><p class="msg" id="am"></p></form></section>`;
+    </div><p class="msg" id="am"></p></form><div id="alog"></div></section>`;
+  adminLog();
   const f=$('#af'); let act='add_player';
   f.querySelectorAll('button').forEach(b=>b.onclick=()=>{act=b.dataset.a;});
   f.onsubmit=async e=>{
@@ -242,8 +243,19 @@ async function manage(){
     if(act==='remove_player'&&!confirm(v('id')+' 을(를) 명단에서 뺄까요? 장부는 남습니다.')) return;
     say('보내는 중입니다.');
     const r=await post('api/admin',act==='add_player'?{action:act,id:v('id'),...who,name:v('name'),agent:v('agent')}:{action:act,id:v('id')});
-    say(r.text,r.ok?'ok':'bad'); if(r.ok){ f.reset(); setTimeout(load,90*1000); }
+    say(r.text,r.ok?'ok':'bad'); if(r.ok){ f.reset(); setTimeout(()=>{load(); adminLog();},90*1000); }
   };
+}
+// 관리 요청의 결과 — 거래소가 처리한 뒤 남긴 기록 (최근 것부터)
+async function adminLog(){
+  let log=[];
+  try{ const r=await fetch(`data/admin_log.json?t=${Date.now()}`,{cache:'no-store'}); if(r.ok) log=await r.json(); }catch(e){}
+  const box=$('#alog'); if(!box) return;
+  if(!Array.isArray(log)||!log.length){ box.innerHTML=''; return; }
+  const esc=t=>String(t==null?'':t).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const when=t=>{ try{ return new Date(t).toLocaleString('ko-KR',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}); }catch(e){ return ''; } };
+  box.innerHTML='<p class="sub" style="margin-top:14px">최근 처리 결과</p>'+log.slice(-8).reverse().map(x=>
+    `<p class="msg ${x.ok?'ok':'bad'}" style="margin:4px 0">${esc(when(x.at))} · ${x.ok?'됨':'안 됨'} · ${esc(x.text)}</p>`).join('');
 }
 
 function spark(v, base){

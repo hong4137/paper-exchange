@@ -56,6 +56,12 @@ def issue(now, author, number, body, title="[주문] 시험"):
     return reply.read_text(encoding="utf-8")
 
 
+def roster():
+    """명단·대회는 관리 명령이 생기면 자료 폴더의 players.json 에, 그 전에는 config.json 에 있다."""
+    f = tmp / "players.json"
+    return {**json.loads((tmp / "config.json").read_text(encoding="utf-8")), **(json.loads(f.read_text(encoding="utf-8")) if f.exists() else {})}
+
+
 def ledger(acct=None):
     f = tmp / "ledger" / "ledger.jsonl" if acct is None else tmp / "accounts" / acct / "ledger.jsonl"
     return [json.loads(x) for x in f.read_text(encoding="utf-8").splitlines()] if f.exists() else []
@@ -127,12 +133,12 @@ check("처리한 요청 파일은 치우고, 명단에 없는 폴더는 건드�
 # 관리 이슈: 주인 계정만 참가자를 넣고 빼고 대회를 정한다
 r = issue(MON, "alice", 30, {"action": "add_player", "github": "carol"}, title="[관리] 넣기")
 check("주인이 아닌 계정의 관리 명령은 받지 않는다", "주인만" in r and not (tmp / "accounts" / "carol").exists()
-      and len(json.loads((tmp / "config.json").read_text(encoding="utf-8"))["players"]) == 4, r)
+      and len(roster()["players"]) == 4, r)
 r = issue(MON, "owner-kim", 31, [{"action": "add_player", "github": "Carol", "name": "캐럴", "agent": "새 에이전트"},
                                   {"action": "add_contest", "name": "새 대회", "start": "2027-01-01", "end": "2027-01-31"},
                                   {"action": "add_player", "github": "../x"},
                                   {"action": "remove_player", "github": "owner-kim"}], title="[관리] 넣기")
-c2 = json.loads((tmp / "config.json").read_text(encoding="utf-8"))
+c2 = roster()
 check("주인의 관리 명령: 참가자를 넣으면 계좌가 바로 열리고, 대회 기간이 설정에 적힌다", "명단에 넣었습니다" in r and ledger("carol")[0]["type"] == "open"
       and {"github": "Carol", "name": "캐럴", "agent": "새 에이전트"} in c2["players"]
       and {"name": "새 대회", "start": "2027-01-01", "end": "2027-01-31"} in c2["league"]["contests"], r)
@@ -140,14 +146,14 @@ check("이상한 계정 이름과 주인 계좌 빼기는 하지 않는다", r.c
 r = issue(MON, "carol", 32, {"symbol": "000010", "side": "buy", "qty": 1, "type": "moc"})
 check("새로 들어온 참가자가 바로 주문할 수 있다", "주문 번호 O0001" in r, r)
 r = issue(MON, "Owner-Kim", 33, [{"action": "remove_player", "github": "carol"}, {"action": "remove_contest", "name": "새 대회"}], title="[관리] 빼기")
-c3 = json.loads((tmp / "config.json").read_text(encoding="utf-8"))
+c3 = roster()
 check("참가자를 빼면 명단에서 빠지고 장부는 남는다", "명단에서 뺐습니다" in r and not any(str(p.get("github")).lower() == "carol" for p in c3["players"])
       and len(ledger("carol")) == 2 and not any(c["name"] == "새 대회" for c in c3["league"]["contests"]), r)
 r = issue(MON, "owner-kim", 35, [{"action": "add_player", "id": "Dave-1", "email": "Dave@Example.com", "name": "데이브"},
                                   {"action": "add_player", "id": "erin", "email": "dave@example.com"},
                                   {"action": "add_player", "id": "gina", "login": "Gina-ST", "name": "지나"},
                                   {"action": "add_player", "id": "frank", "email": "이메일아님"}], title="[관리] 이메일")
-c4 = json.loads((tmp / "config.json").read_text(encoding="utf-8"))
+c4 = roster()
 check("GitHub 계정 없이 이름표와 이메일만으로도 참가자를 넣는다 (로그인한 화면으로 주문하는 사람)",
       {"id": "dave-1", "email": "dave@example.com", "name": "데이브"} in c4["players"] and ledger("dave-1")[0]["type"] == "open", r)
 check("같은 이메일을 두 계좌에 쓰거나 이메일이 아닌 값은 넣지 않는다", r.count("하지 않았습니다") == 2 and not (tmp / "accounts" / "erin").exists(), r)
@@ -155,6 +161,23 @@ check("로그인 아이디만으로도 참가자를 넣는다", {"id": "gina", "
 issue(MON, "owner-kim", 36, [{"action": "remove_player", "id": "dave-1"}, {"action": "remove_player", "id": "gina"}], title="[관리] 빼기")
 r = issue(MON, "carol", 34, {"symbol": "000010", "side": "buy", "qty": 1})
 check("빠진 사람의 주문은 받지 않는다", "명단에 없어" in r and len(ledger("carol")) == 2, r)
+
+# 관리 창구 (sharktalk 관리자 화면이 자료 폴더 admin/ 에 올리는 파일)
+rules_before = (tmp / "config.json").read_text(encoding="utf-8")
+(tmp / "admin").mkdir()
+(tmp / "admin" / "a1.json").write_text(json.dumps({"action": "add_player", "id": "gina", "email": "gina@example.com", "name": "지나", "requested_at": "x"}), encoding="utf-8")
+(tmp / "admin" / "a2.json").write_text(json.dumps({"action": "remove_player", "id": "nobody"}), encoding="utf-8")
+(tmp / "admin" / "a3.json").write_text("깨진 파일", encoding="utf-8")
+run(MON, "admin-inbox")
+alog = json.loads((tmp / "docs" / "data" / "admin_log.json").read_text(encoding="utf-8"))
+check("관리 창구: 파일로 온 관리 요청을 처리하고 계좌를 연다", any(p.get("id") == "gina" for p in roster()["players"]) and ledger("gina")[0]["type"] == "open"
+      and not list((tmp / "admin").glob("*.json")), str(alog))
+check("관리 창구: 결과가 관리자 화면용 기록에 남는다 (되지 않은 것도 사유와 함께)", [x["ok"] for x in alog[-3:]] == [True, False, False]
+      and "명단에 없습니다" in alog[-2]["text"] and "읽을 수 없습니다" in alog[-1]["text"] and "`" not in "".join(x["text"] for x in alog), str(alog[-3:]))
+check("명단은 players.json 에 쓰고, 규칙·요율이 든 config.json 은 건드리지 않는다", (tmp / "config.json").read_text(encoding="utf-8") == rules_before
+      and set(json.loads((tmp / "players.json").read_text(encoding="utf-8"))) <= {"players", "league"})
+(tmp / "admin" / "a4.json").write_text(json.dumps({"action": "remove_player", "id": "gina"}), encoding="utf-8")
+run(MON, "admin-inbox")
 
 # 체결과 순위
 WED = "2026-11-05T09:00:00+09:00"

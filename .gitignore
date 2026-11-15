@@ -2,3 +2,14 @@
 __pycache__/
 운용자/
 reports/
+home/
+# 자료는 비공개 저장소 paper-exchange-data 에 있다 — 여기에 올리지 않는다
+ledger/
+accounts/
+data/
+inbox/
+admin/
+logs/
+players.json
+docs/data/*
+!docs/data/demo.json

@@ -7,16 +7,16 @@
 //        로그인 됨 = 200 {authenticated:true, user:{email,name,role}}. sharktalk 의 "아이디"는 이메일 하나뿐이다.
 //        로그인 화면은 https://auth.sharktalk.co.kr/login?next=돌아올주소 (sharktalk 주소만 받는다).
 //      AUTH_SVC 가 없고 ACCESS_TEAM·ACCESS_AUD 가 있으면 Cloudflare Access 토큰으로 확인한다 (sharktalk 밖에 올릴 때의 대안).
-//   2. 누구인지: 로그인한 사람(이메일 또는 sharktalk 아이디) → 참가자 (저장소 config.json players[] 의 email 또는 login).
+//   2. 누구인지: 로그인한 사람(이메일 또는 sharktalk 아이디) → 참가자 (자료 저장소 players.json 의 players[] email 또는 login. 없으면 config.json).
 //      관리자는 비밀 설정 ADMIN_EMAILS (이메일이나 아이디, 쉼표로 여럿).
 //   3. 자료 내주기: /data/... 는 저장소에서 읽어 오되, 자기 계좌 것만. 전체 수익률과 관리자 화면은 관리자만.
 //   4. 주문 받기: /api/order → 저장소의 inbox/{계좌}/ 에 요청 파일을 올린다 (거래소의 주문 창구가 접수한다).
-//   5. 관리: /api/admin → 저장소에 "[관리]" 이슈를 연다 (거래소가 주인 계정의 이슈로 처리한다).
+//   5. 관리: /api/admin → 자료 저장소의 admin/ 에 요청 파일을 올린다 (거래소의 관리 창구가 처리하고 결과를 data/admin_log.json 에 남긴다).
 //   6. 시장 정보(주문 페이지): /api/market 시장 현황, /api/search?q= 종목 검색, /api/quote?symbol= 종목 현황 — market.mjs. 로그인한 참가자 누구나.
 //
 // 설정 (wrangler.jsonc 의 vars·services 와 wrangler secret)
 //   AUTH_SVC      sharktalk-auth 워커 (service binding)     AUTH_ME_URL  /me 주소      LOGIN_URL  로그인하러 갈 주소
-//   GITHUB_REPO   예: hong4137/paper-exchange               GITHUB_TOKEN 그 저장소의 Contents·Issues 읽기/쓰기 토큰 (비밀)
+//   GITHUB_REPO   자료 저장소 hong4137/paper-exchange-data (비공개)   GITHUB_TOKEN 그 저장소의 Contents 읽기/쓰기 토큰 (비밀)
 //   ADMIN_EMAILS  관리자의 이메일이나 아이디 (비밀)          GITHUB_BRANCH 기본 main
 //
 // 이 파일은 거래소의 돈 계산을 하지 않는다. 주문이 맞는지는 거래소(broker.py)가 판단한다.
@@ -117,7 +117,8 @@ async function repoFile(env, path, fetchFn) {
 let cfgCache = { at: 0, cfg: null };
 async function loadConfig(env, fetchFn) {
   if (cfgCache.cfg && Date.now() - cfgCache.at < 60 * 1000) return cfgCache.cfg;
-  const r = await repoFile(env, 'config.json', fetchFn);
+  let r = await repoFile(env, 'players.json', fetchFn);           // 자료 저장소의 명단
+  if (r.status === 404) r = await repoFile(env, 'config.json', fetchFn);  // 예전 자리 (한 저장소 시절)
   if (!r.ok) throw new Error('거래소 설정을 읽지 못했습니다');
   cfgCache = { at: Date.now(), cfg: await r.json() };
   return cfgCache.cfg;
@@ -148,6 +149,7 @@ export function canRead(pathname, me) {
   if (m) return me.admin || (me.id !== null && me.id === m[1]);          // 자기 계좌만 (관리자는 전부)
   if (pathname === '/data/state.json') return me.admin || me.main;       // 주인 계좌
   if (pathname === '/data/league.json') return me.admin;                 // 전체 수익률
+  if (pathname === '/data/admin_log.json') return me.admin;              // 관리 요청의 결과
   return false;                                                          // 그 밖의 자료는 내주지 않는다
 }
 
@@ -191,14 +193,18 @@ export async function submitOrder(body, me, env, fetchFn = fetch, now = new Date
 const ADMIN_ACTIONS = { add_player: ['id', 'github', 'email', 'login', 'name', 'agent'], remove_player: ['id', 'github'],
                         add_contest: ['name', 'start', 'end'], remove_contest: ['name'] };
 
-/** 관리 명령을 저장소의 "[관리]" 이슈로 넘긴다. 이슈는 토큰 주인(거래소 주인)의 이름으로 열린다. */
-export async function submitAdmin(body, env, fetchFn = fetch) {
+/** 관리 명령을 자료 저장소의 admin/ 에 요청 파일로 올린다 (관리자만 부른다 — handle 이 확인한다). */
+export async function submitAdmin(body, env, fetchFn = fetch, now = new Date()) {
   const keys = ADMIN_ACTIONS[body.action];
   if (!keys) return { ok: false, status: 400 };
   const req = { action: body.action };
   for (const k of keys) if (typeof body[k] === 'string' && body[k].trim()) req[k] = body[k].trim().slice(0, 80);
-  const r = await gh(env, 'issues', { method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ title: `[관리] ${req.action}`, body: '```json\n' + JSON.stringify(req) + '\n```' }) }, fetchFn);
+  req.requested_at = now.toISOString();
+  const stamp = now.toISOString().replace(/[-:.TZ]/g, '').slice(0, 17);
+  const rand = Array.from(crypto.getRandomValues(new Uint8Array(4)), (b) => b.toString(16).padStart(2, '0')).join('');
+  const r = await gh(env, `contents/admin/${stamp}-${rand}.json`, { method: 'PUT', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ message: `관리 요청 ${req.action}`, branch: branch(env),
+                           content: bytesToB64(te.encode(JSON.stringify(req))) }) }, fetchFn);
   if (!r.ok) return { ok: false, status: r.status };
   return { ok: true };
 }

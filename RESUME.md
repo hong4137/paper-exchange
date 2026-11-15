@@ -2,6 +2,11 @@
 
 집 PC ↔ 회사 PC 에서 이어 하기 위한 기록. 거래소 본체(장부·체결·매시 실행)는 `CLAUDE.md`, 올리는 순서는 `운영-안내.md`.
 
+## 두 저장소로 나눔 (2026-11-15, 클라우드 세션)
+- 엔진(공개) `hong4137/paper-exchange` / 자료(비공개) `hong4137/paper-exchange-data`. 자세한 것은 `운영-안내.md` "두 저장소로 나눔".
+- 문지기의 `GITHUB_REPO` 는 이제 `hong4137/paper-exchange-data`(`wrangler.jsonc`), `GITHUB_TOKEN` 은 `site-deploy` 가 저장소 비밀 `DATA_TOKEN` 으로 맞춘다.
+- 손으로 올릴 때는 `GITHUB_TOKEN` 도 자료 저장소를 열 수 있는 토큰으로 다시 넣어야 한다(`npx wrangler secret put GITHUB_TOKEN`).
+
 ## 지금 상태 (2026-11-15)
 - **올라가 있다.** 워커 `sharktalk-exchange`, 주소 `https://exchange.sharktalk.co.kr`, Cloudflare 개인 계정(paran, sharktalk 가 있는 계정).
 - 올리는 명령 (이 폴더에서). PowerShell: `$env:CLOUDFLARE_ACCOUNT_ID = "8a7b1e2e89027f9c078fac80ab49d22e"` 를 먼저 치고 `npx wrangler deploy`.

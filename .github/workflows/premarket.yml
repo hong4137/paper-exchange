@@ -1,6 +1,6 @@
 name: kr-premarket
 # 한국 장전(넥스트레이드 프리마켓 08:00~08:50) 시세를 그 시간에 직접 모은다 — 지난 장전 1분 시세는 무료로 받을 곳이 없다.
-# 보유 종목·살아 있는 주문에 한국 종목이 없으면 바로 끝난다.
+# 보유 종목·살아 있는 주문에 한국 종목이 없으면 바로 끝난다. 자료는 비공개 자료 저장소에서 읽고 쓴다(어떤 종목인지 이 실행 기록에 찍히지 않는다).
 # 주의: GitHub 예약 실행은 늦게 시작될 수 있다. 늦게 시작한 만큼 앞부분이 빠진다.
 on:
   schedule:
@@ -8,7 +8,10 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  PAPER_HOME: ${{ github.workspace }}/home
 
 concurrency:
   group: ledger
@@ -20,6 +23,12 @@ jobs:
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
+      - name: 자료 저장소 받기
+        uses: actions/checkout@v4
+        with:
+          repository: hong4137/paper-exchange-data
+          token: ${{ secrets.DATA_TOKEN }}
+          path: home
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -28,6 +37,7 @@ jobs:
           end=$(TZ=Asia/Seoul date -d 'today 08:52' +%s); now=$(date +%s)
           mins=$(( (end - now) / 60 ))
           if [ "$mins" -lt 1 ]; then echo "장전 시간이 지났습니다"; exit 0; fi
-          python broker/live.py --minutes "$mins"
-      - name: 올리기
-        run: bash .github/commit.sh "한국 장전 시세 $(TZ=Asia/Seoul date '+%m-%d')"
+          bash .github/run-quiet.sh premarket python broker/live.py --minutes "$mins"
+      - name: 자료 저장소에 올리기
+        if: always()
+        run: bash .github/commit-data.sh "한국 장전 시세 $(TZ=Asia/Seoul date '+%m-%d')"
