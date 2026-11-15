@@ -4,7 +4,8 @@
 
 ## 지금 상태 (2026-11-15)
 - **올라가 있다.** 워커 `sharktalk-exchange`, 주소 `https://exchange.sharktalk.co.kr`, Cloudflare 개인 계정(paran, sharktalk 가 있는 계정).
-- 올리는 명령 (이 폴더에서): `CLOUDFLARE_ACCOUNT_ID=8a7b1e2e89027f9c078fac80ab49d22e npx wrangler deploy`
+- 올리는 명령 (이 폴더에서). PowerShell: `$env:CLOUDFLARE_ACCOUNT_ID = "8a7b1e2e89027f9c078fac80ab49d22e"` 를 먼저 치고 `npx wrangler deploy`.
+  Git Bash: `CLOUDFLARE_ACCOUNT_ID=8a7b1e2e89027f9c078fac80ab49d22e npx wrangler deploy`. 비밀 설정(`secret put`)도 같은 식으로 계정 번호를 준 창에서 한다.
   올리기 전 `npx wrangler whoami` 로 개인 계정인지 본다. 회사 계정이면 올리지 않는다.
 - 로그인하지 않은 요청은 전부 401 로 막힌다 (2026-11-15 직접 요청해 확인: `/`, `/index.html`, `/admin.html`, `/admin`, `/data/league.json`, `/data/state.json`, `/data/accounts/…`, `/data/demo.json`, `/api/me`, `/api/order`, 가짜 쿠키). `workers.dev` 주소는 없다.
 - **비밀 설정 두 가지가 아직 없다** → 로그인해도 "거래소 자료를 읽지 못했습니다"가 나온다. 사용자가 직접 넣는다:
