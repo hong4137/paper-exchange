@@ -192,7 +192,7 @@ footer{margin:40px 0 50px; padding-top:16px; border-top:1px solid var(--line); c
   <div id="manage"></div>
   <div id="league"><p class="empty" style="margin-top:20px">전체 계좌 자료를 불러오는 중입니다.</p></div>
   <footer>이 화면은 거래소 주인이 모든 계좌의 수익률을 한눈에 보는 곳입니다. 참가자 화면에는 이 화면으로 오는 길이 없습니다.<br>
-    로그인이 있는 주소에서는 관리자만 열 수 있습니다. 로그인이 없는 주소(공개 저장소의 화면)에서는 주소를 아는 사람이 열 수 있습니다. 5분마다 다시 불러옵니다.</footer>
+    sharktalk 에 로그인한 관리자만 열 수 있습니다. 5분마다 다시 불러옵니다.</footer>
 </div>
 <script>
 const $=s=>document.querySelector(s);
@@ -218,10 +218,10 @@ async function whoAmI(){
 async function manage(){
   const me=await whoAmI();
   if(!me||!me.admin) return;
-  $('#manage').innerHTML=`<section><h2>참가자 관리</h2><p class="sub">넣으면 계좌가 같은 시작 금액으로 열립니다. 이름표는 계좌를 가리키는 짧은 영문 이름이고, 로그인 이메일(또는 아이디)은 그 사람이 sharktalk 에 로그인할 때 쓰는 것입니다. 1~2분 뒤 아래 표에 반영됩니다.</p>
+  $('#manage').innerHTML=`<section><h2>참가자 관리</h2><p class="sub">넣으면 계좌가 같은 시작 금액으로 열립니다. 이름표는 계좌를 가리키는 짧은 영문 이름이고, 이메일은 그 사람이 sharktalk 에 로그인할 때 쓰는 주소입니다. sharktalk 계정은 따로 만들어 주어야 합니다. 1~2분 뒤 아래 표에 반영됩니다.</p>
     <form class="form" id="af"><div class="row">
       <label>이름표 (영문·숫자)<input name="id" placeholder="alice" autocomplete="off"></label>
-      <label>로그인 이메일 또는 아이디<input name="who" placeholder="alice@example.com" autocomplete="off" style="width:220px"></label>
+      <label>sharktalk 로그인 이메일<input name="who" type="email" placeholder="alice@example.com" autocomplete="off" style="width:220px"></label>
       <label>화면에 나올 이름<input name="name" autocomplete="off"></label>
       <label>어떤 에이전트인지 (없어도 됨)<input name="agent" autocomplete="off"></label>
       <button type="submit" data-a="add_player">넣기 · 고치기</button>
@@ -233,8 +233,8 @@ async function manage(){
     e.preventDefault();
     const v=n=>f.elements[n].value.trim(), msg=$('#am'), say=(t,c)=>{msg.textContent=t; msg.className='msg '+(c||'');};
     if(!v('id')) return say('이름표를 적어 주세요.','bad');
-    if(act==='add_player'&&!v('who')) return say('로그인 이메일이나 아이디를 적어 주세요.','bad');
-    const who=v('who').includes('@')?{email:v('who')}:{login:v('who')};
+    if(act==='add_player'&&!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v('who'))) return say('그 사람이 sharktalk 에 로그인할 때 쓰는 이메일을 적어 주세요.','bad');
+    const who={email:v('who')};
     if(act==='remove_player'&&!confirm(v('id')+' 을(를) 명단에서 뺄까요? 장부는 남습니다.')) return;
     say('보내는 중입니다.');
     const r=await post('api/admin',act==='add_player'?{action:act,id:v('id'),...who,name:v('name'),agent:v('agent')}:{action:act,id:v('id')});
