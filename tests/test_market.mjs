@@ -37,6 +37,12 @@ check('열다섯 가지가 네 묶음으로 나온다', ov.items.length === 15 &
 check('등락과 등락률: 100 → 110 = +10, +10%', by.kospi.price === 110 && by.kospi.chg === 10 && by.kospi.chg_pct === 10 && by.kospi.spark.length === 3, JSON.stringify(by.kospi));
 check('금리는 %로, 옛 표기(×10)면 나눠서, 바뀐 폭은 %p 로', by.tnx.price === 4.25 && by.tnx.chg === 0.05 && by.tnx.chg_pct === null && by.tnx.rate, JSON.stringify(by.tnx));
 check('하나를 못 받아도 나머지는 나온다', by.hsi.error && by.spx.price === 110);
+M._resetMarket();
+delete routes[`/chart/${encodeURIComponent('ES=F')}?`];
+routes[`/chart/${encodeURIComponent('ES=F')}?range=1d`] = yChart('ES=F', { price: 7583, prev: 7615, closes: [7583], start: NOW, step: 300 });
+routes[`/chart/${encodeURIComponent('ES=F')}?range=5d`] = yChart('ES=F', { price: 7583, prev: 7615, closes: [7600, 7610, 7590, 7583], start: NOW - 2 * 86400 - 900, step: 300 });
+const es = (await M.overview(fetchFn)).items.find((x) => x.key === 'es');
+check('쉬는 날 "오늘" 그래프가 비면 가장 최근 거래일 것으로 채운다 (선물·원자재)', es.price === 7583 && es.spark.length === 4 && es.chg_pct === -0.42, JSON.stringify(es));
 const n = hits.length;
 await M.overview(fetchFn);
 check('30초 안에 다시 보면 받은 것은 다시 묻지 않는다 (못 받은 것만 다시 묻는다)', hits.length === n + 1 && hits.at(-1).includes('HSI'), String(hits.length - n));

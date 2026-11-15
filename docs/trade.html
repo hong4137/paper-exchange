@@ -310,7 +310,7 @@ function renderMarket(){
   box.innerHTML=`<div class="mkgroups">${groups.map(g=>`<div class="mkg"><div class="gl">${esc(g)}</div><div class="mkrow">${
     MKT.items.filter(x=>x.group===g).map(x=>x.error?`<div class="mk err"><div class="l">${esc(x.label)}</div><div class="v">받지 못함</div></div>`:
       `<div class="mk" title="${x.time?'기준 '+hm(x.time):''}"><div class="l">${esc(x.label)}</div><div class="v num">${mkValue(x)}</div>
-        <div class="c num ${cls(x.chg)}">${x.rate?(x.chg>0?'+':'')+numfmt(x.chg,3)+'%p':pct(x.chg_pct)}</div>${spark(x.spark,54,22,x.prev)}</div>`).join('')}</div></div>`).join('')}</div>`;
+        <div class="c num ${cls(x.chg)}">${x.rate?(x.chg>0?'+':'')+numfmt(x.chg,3)+'%p':pct(x.chg_pct)}</div>${spark(x.spark,54,22,x.prev)||'<svg viewBox="0 0 54 22" aria-hidden="true"></svg>'}</div>`).join('')}</div></div>`).join('')}</div>`;
   $('#mkasof').textContent=MKT.at?`${hm(MKT.at)} 기준`:'';
 }
 async function loadMarket(){

@@ -78,7 +78,12 @@ export function readYahooChart(j) {
 export async function overview(fetchFn = fetch) {
   const items = await Promise.all(OVERVIEW.map(async (o) => {
     try {
-      const c = readYahooChart(await getJSON(yahooChart(o.y, '1d', '5m', false), fetchFn));
+      let c = readYahooChart(await getJSON(yahooChart(o.y, '1d', '5m', false), fetchFn));
+      if (c.bars.length < 2) {      // 선물·원자재는 쉬는 날 "오늘"이 비어 있다 — 최근 며칠 것을 받아 가장 최근 거래일만 쓴다
+        const w = readYahooChart(await getJSON(yahooChart(o.y, '5d', '15m', false), fetchFn));
+        const lastDay = w.bars.length ? Math.floor((w.bars[w.bars.length - 1][0] + 9 * 3600) / 86400) : null;
+        c = { ...c, bars: w.bars.filter((b) => Math.floor((b[0] + 9 * 3600) / 86400) === lastDay), price: c.price ?? w.price, prev: c.prev ?? w.prev };
+      }
       let { price, prev } = c;
       let spark = c.bars.map((b) => b[1]);
       if (o.rate && price > 20) { price /= 10; prev = prev && prev / 10; spark = spark.map((v) => v / 10); }   // 옛 표기(금리×10) 대비
