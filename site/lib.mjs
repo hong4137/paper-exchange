@@ -195,7 +195,8 @@ export async function submitOrder(body, me, env, fetchFn = fetch, now = new Date
 const ADMIN_ACTIONS = { add_player: ['id', 'github', 'email', 'login', 'name', 'agent'], remove_player: ['id', 'github'],
                         add_contest: ['name', 'start', 'end'], remove_contest: ['name'],
                         approve_fork: ['account', 'fork'], reject_fork: ['account', 'fork', 'why'],
-                        set_key: ['id', 'hash', 'label'], revoke_key: ['id'] };
+                        set_key: ['id', 'hash', 'label'], revoke_key: ['id'],
+                        approve_application: ['id', 'account'], reject_application: ['id', 'why'] };
 
 /** 관리 명령을 자료 저장소의 admin/ 에 요청 파일로 올린다 (관리자만 부른다 — handle 이 확인한다). */
 export async function submitAdmin(body, env, fetchFn = fetch, now = new Date()) {
@@ -291,8 +292,87 @@ export function requestStatus(cid, acct, checks, queued) {
   return { client_id: cid, status: queued ? 'queued' : 'unknown' };
 }
 
+// ---------- 참가 신청 (열쇠 없이) ----------
+// POST /api/v1/apply {real_name(신청한 사람의 실명, 필수), name(화면 이름), agent, id(바라는 이름표), email, message}
+//   → 자료 저장소 applications/pending/{신청 번호}.json, 답은 202 {application, claim(찾아갈 번호 — 한 번만 보여 준다)}
+// GET  /api/v1/apply/{신청 번호} + Authorization: Bearer pxc_… (찾아갈 번호)
+//   → pending / rejected(why) / approved: 처음 한 번만 에이전트 열쇠(pxk_)를 내준다 (그때 만들어 지문만 거래소에 보낸다)
+const APP_RE = /^ap-[0-9]{17}-[0-9a-f]{8}$/;
+const CLAIM_RE = /^pxc_[A-Za-z0-9]{32,64}$/;
+const APPLY_MAX_PENDING = 20, APPLY_PER_HOUR = 5;
+const applyRate = new Map();                              // 보낸 곳(IP) → [시, 횟수] — 워커 하나 안에서 대략
+
+async function randomToken(prefix) {
+  const abc = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  return prefix + Array.from(crypto.getRandomValues(new Uint8Array(40)), (b) => abc[b % abc.length]).join('');
+}
+
+async function handleApply(request, env, fetchFn, url) {
+  const path = url.pathname;
+  if (path === '/api/v1/apply' && request.method === 'POST') {
+    const ip = request.headers.get('CF-Connecting-IP') || 'x';
+    const hour = Math.floor(Date.now() / 3600000);
+    const [h0, n0] = applyRate.get(ip) || [hour, 0];
+    const n = h0 === hour ? n0 + 1 : 1;
+    applyRate.set(ip, [hour, n]);
+    if (n > APPLY_PER_HOUR) return json({ error: '신청이 너무 잦습니다. 한 시간 뒤에 다시 해 주세요.' }, 429);
+    if (!/^application\/json/i.test(request.headers.get('content-type') || '')) return json({ error: 'JSON 으로 보내 주세요' }, 400);
+    const text = await request.text();
+    if (text.length > 4000) return json({ error: '신청이 너무 깁니다' }, 400);
+    let b; try { b = JSON.parse(text); } catch (e) { b = null; }
+    if (!b || typeof b !== 'object' || Array.isArray(b)) return json({ error: '신청 내용을 읽을 수 없습니다' }, 400);
+    const str = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
+    const app = { real_name: str(b.real_name, 30), name: str(b.name, 30), agent: str(b.agent, 40), want_id: str(b.id, 20).toLowerCase(),
+                  email: str(b.email, 120).toLowerCase(), message: str(b.message, 300) };
+    if (app.real_name.length < 2) return json({ error: '신청한 사람의 실명(real_name)을 적어 주세요' }, 400);
+    if (!app.name) return json({ error: '화면에 나올 이름(name)을 적어 주세요' }, 400);
+    if (app.email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(app.email)) return json({ error: '이메일 모양이 올바르지 않습니다' }, 400);
+    if (app.want_id && !/^[a-z][a-z0-9-]{1,19}$/.test(app.want_id)) return json({ error: '바라는 이름표(id)는 영문 소문자로 시작하는 영문·숫자·- 20자까지입니다' }, 400);
+    const list = await gh(env, `contents/applications/pending?ref=${encodeURIComponent(branch(env))}`, {}, fetchFn);
+    if (list.ok && (await list.json()).filter((x) => /\.json$/.test(x.name)).length >= APPLY_MAX_PENDING)
+      return json({ error: '기다리는 신청이 많습니다. 주인이 정리한 뒤 다시 해 주세요.' }, 503);
+    const now = new Date();
+    const stamp = now.toISOString().replace(/[-:.TZ]/g, '').slice(0, 17);
+    const id = `ap-${stamp}-${Array.from(crypto.getRandomValues(new Uint8Array(4)), (x) => x.toString(16).padStart(2, '0')).join('')}`;
+    const claim = await randomToken('pxc_');
+    const rec = { id, ...Object.fromEntries(Object.entries(app).filter(([, v]) => v)), claim_hash: await sha256hex(claim), applied_at: now.toISOString(), status: 'pending' };
+    const r = await gh(env, `contents/applications/pending/${id}.json`, { method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: `참가 신청 ${id}`, branch: branch(env), content: bytesToB64(te.encode(JSON.stringify(rec, null, 1))) }) }, fetchFn);
+    if (!r.ok) return json({ error: '거래소에 전하지 못했습니다. 잠시 뒤 다시 해 주세요.' }, 502);
+    return json({ ok: true, application: id, claim, status: 'pending',
+                  message: '신청을 받았습니다. 찾아갈 번호(claim)는 지금 한 번만 보여 줍니다 — 잘 두세요. 주인이 수락하면 GET /api/v1/apply/{application} 에 Authorization: Bearer {claim} 을 붙여 열쇠를 받아 갑니다.' }, 202);
+  }
+  const m = /^\/api\/v1\/apply\/(ap-[0-9]{17}-[0-9a-f]{8})$/.exec(path);
+  if (m && request.method === 'GET') {
+    const auth = /^Bearer\s+(\S+)$/.exec(request.headers.get('Authorization') || '');
+    if (!auth || !CLAIM_RE.test(auth[1])) return json({ error: '찾아갈 번호가 없거나 맞지 않습니다 (Authorization: Bearer pxc_…)' }, 401);
+    const h = await sha256hex(auth[1]);
+    let rec = null, where = null, sha = null;
+    for (const kind of ['pending', 'done']) {
+      const r = await gh(env, `contents/applications/${kind}/${m[1]}.json?ref=${encodeURIComponent(branch(env))}`, {}, fetchFn);
+      if (r.ok) { const j = await r.json(); rec = JSON.parse(new TextDecoder().decode(b64uToBytes(j.content.replace(/\n/g, '')))); where = kind; sha = j.sha; break; }
+    }
+    if (!rec || rec.claim_hash !== h) return json({ error: '신청 번호나 찾아갈 번호가 맞지 않습니다' }, 401);
+    if (rec.status === 'pending' || where === 'pending') return json({ application: rec.id, status: 'pending', message: '주인이 아직 정하지 않았습니다. 나중에 다시 물어 주세요.' });
+    if (rec.status === 'rejected') return json({ application: rec.id, status: 'rejected', why: rec.why || '' });
+    if (rec.claimed_at) return json({ application: rec.id, status: 'approved', account: rec.account, claimed: true,
+                                      message: '열쇠는 이미 받아 갔습니다. 잃었으면 주인에게 새로 받으세요.' });
+    const k = await newAgentKey();
+    const done = { ...rec, claimed_at: new Date().toISOString() };
+    const w = await gh(env, `contents/applications/done/${rec.id}.json`, { method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: `열쇠 받아 감 ${rec.id}`, branch: branch(env), sha, content: bytesToB64(te.encode(JSON.stringify(done, null, 1))) }) }, fetchFn);
+    if (!w.ok) return json({ error: '열쇠를 내주지 못했습니다. 잠시 뒤 다시 해 주세요.' }, w.status === 409 ? 409 : 502);
+    const r = await submitAdmin({ action: 'set_key', id: rec.account, hash: k.hash, label: '신청 ' + rec.id }, env, fetchFn);
+    if (!r.ok) return json({ error: '열쇠를 거래소에 알리지 못했습니다. 주인에게 알려 주세요.' }, 502);
+    return json({ application: rec.id, status: 'approved', account: rec.account, key: k.key,
+                  message: '에이전트 열쇠입니다. 지금 한 번만 보여 줍니다. 1~2분 뒤부터 쓸 수 있습니다 — 쓰는 법은 에이전트-안내.md.' });
+  }
+  return json({ error: '없는 주소이거나 보내는 방식이 다릅니다' }, 404);
+}
+
 async function handleAgent(request, env, fetchFn, url) {
   const path = url.pathname;
+  if (path === '/api/v1/apply' || path.startsWith('/api/v1/apply/')) return handleApply(request, env, fetchFn, url);
   let cfg;
   try { cfg = await loadConfig(env, fetchFn); } catch (e) { return json({ error: '거래소 자료를 읽지 못했습니다' }, 502); }
   const ag = await agentFromKey(request, cfg);
@@ -354,6 +434,13 @@ export async function handle(request, env, next, fetchFn = fetch) {
   const url = new URL(request.url);
   const path = url.pathname;
   if (path.startsWith('/api/v1/')) return handleAgent(request, env, fetchFn, url);   // 에이전트는 로그인 대신 열쇠
+  if ((path === '/apply' || path === '/apply.html') && request.method === 'GET') {   // 참가 원서 — 로그인 없이 열리는 유일한 화면
+    const res = await next();
+    const headers = new Headers(res.headers);
+    headers.set('cache-control', 'no-store');
+    headers.set('x-robots-tag', 'noindex, nofollow');
+    return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+  }
   const api = path.startsWith('/api/') || path.startsWith('/data/');
   const who = env.AUTH_SVC ? await verifySharktalk(request, env) : await verifyAccess(request, env, fetchFn);
   if (!who) {

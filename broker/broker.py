@@ -224,6 +224,27 @@ def performance(equity, initial):
             "worst_day_pct": round(min(rets) * 100, 2) if rets else None}
 
 
+def _real_name(cfg, aid):
+    p = next((p for p in cfg.get("players") or [] if str(p.get("id") or p.get("github") or "").lower() == aid), {})
+    return p.get("real_name")
+
+
+def _applications():
+    """관리자 화면용 참가 신청: 기다리는 것 전부 + 최근에 정한 것 20건. 찾아갈 번호의 지문은 싣지 않는다."""
+    out = []
+    for kind in ("pending", "done"):
+        d = HOME / "applications" / kind
+        items = []
+        for f in sorted(d.glob("*.json")) if d.exists() else []:
+            try:
+                a = json.loads(f.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            items.append({k: v for k, v in a.items() if k != "claim_hash"} | {"status": a.get("status") or "pending"})
+        out += items if kind == "pending" else items[-20:]
+    return out
+
+
 def build_league():
     """순위표: 계좌별 화면 자료에서 한 줄씩 뽑아 수익률 순으로."""
     cfg, rows = config(), []
@@ -234,6 +255,7 @@ def build_league():
         st = json.loads(f.read_text(encoding="utf-8"))
         s = st["summary"]
         rows.append({"id": acct["id"], "name": acct["name"], "github": acct["github"], "agent": acct["agent"],
+                     "real_name": _real_name(cfg, acct["id"]),
                      "opened": st["opened"], "asof": st["equity"][-1]["d"] if st["equity"] else None,
                      "total": s["total"], "pnl_krw": s["pnl_krw"], "pnl_pct": s["pnl_pct"], "bench_pct": s["bench_pct"],
                      "excess_pct": None if s["bench_pct"] is None else round(s["pnl_pct"] - s["bench_pct"], 2),
@@ -301,7 +323,7 @@ def build_league():
     out = {"name": (cfg.get("league") or {}).get("name") or "모의 거래소", "updated": now().isoformat(timespec="seconds"),
            "initial": cfg["initial_cash"], "periods": [{"key": k, "label": l} for k, l, _ in PERIODS] + [{"key": "ytd", "label": "올해"}, {"key": "all", "label": "처음부터"}],
            "players": rows, "contests": contests, "families": families, "fork_requests": requests,
-           "fork_max_accounts": _fork_limit(cfg)}
+           "fork_max_accounts": _fork_limit(cfg), "applications": _applications()}
     LEAGUE_OUT.parent.mkdir(parents=True, exist_ok=True)
     LEAGUE_OUT.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
     return out
@@ -1835,6 +1857,37 @@ def admin_do(cfg, req):
         else:
             cs.append(new)
         return f"'{name}' 대회를 {start} ~ {end or '끝 없음'} 으로 정했습니다"
+    if act in ("approve_application", "reject_application"):   # 참가 신청 (문지기의 /api/v1/apply 가 applications/pending/ 에 둔다)
+        aid = str(req.get("id") or "")
+        if not re.fullmatch(r"ap-[0-9]{17}-[0-9a-f]{8}", aid):
+            raise Refused("신청 번호가 올바르지 않습니다")
+        src = HOME / "applications" / "pending" / f"{aid}.json"
+        if not src.exists():
+            raise Refused(f"기다리는 신청이 아닙니다 ({aid})")
+        app = json.loads(src.read_text(encoding="utf-8"))
+        if act == "reject_application":
+            app.update(status="rejected", why=str(req.get("why") or "주인이 거절")[:200], decided_at=now().isoformat(timespec="seconds"))
+            msg = f"{app.get('real_name')} 님의 신청을 거절했습니다"
+        else:
+            players = cfg.setdefault("players", [])
+            used = {str(p.get("id") or p.get("github") or "").lower() for p in players} | {x["id"] for x in accounts(cfg)}
+            want = str(req.get("account") or app.get("want_id") or "").strip().lower()
+            if not want or not re.fullmatch(r"[a-z][a-z0-9-]{1,19}", want) or want in used:
+                n = 1
+                while f"f{n}" in used:
+                    n += 1
+                want = f"f{n}"
+            if app.get("email") and any(str(p.get("email") or "").lower() == app["email"].lower() for p in players):
+                raise Refused("그 이메일은 이미 다른 계좌에 쓰이고 있습니다")
+            players.append({k: v for k, v in {"id": want, "name": app.get("name") or want, "agent": app.get("agent") or "에이전트",
+                                              "email": app.get("email"), "real_name": app.get("real_name"), "application": aid}.items() if v})
+            app.update(status="approved", account=want, decided_at=now().isoformat(timespec="seconds"))
+            msg = f"{app.get('real_name')} 님의 신청을 수락했습니다 — 계좌 `{want}` 가 열립니다. 신청한 쪽이 찾아갈 번호로 열쇠를 받아 갑니다"
+        dst = HOME / "applications" / "done" / f"{aid}.json"
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(json.dumps(app, ensure_ascii=False, indent=1), encoding="utf-8")
+        src.unlink()
+        return msg
     if act in ("set_key", "revoke_key"):               # 에이전트 열쇠 — 문지기가 만들어 주인에게 한 번만 보여 주고, 여기에는 지문(sha256)만 온다
         pid = str(req.get("id") or "").strip().lower()
         cur = next((p for p in cfg.get("players") or [] if str(p.get("id") or p.get("github") or "").lower() == pid), None)
@@ -1848,7 +1901,7 @@ def admin_do(cfg, req):
             raise Refused("열쇠 지문이 올바르지 않습니다")
         cur["api_keys"] = [{"hash": h, "created": now().isoformat(timespec="seconds"), "label": str(req.get("label") or "")[:40]}]
         return f"`{pid}` 의 에이전트 열쇠를 새로 달았습니다 (예전 열쇠는 끊김)"
-    raise Refused("모르는 관리 명령입니다 (add_player · remove_player · add_contest · remove_contest · set_key · revoke_key)")
+    raise Refused("모르는 관리 명령입니다 (add_player · remove_player · add_contest · remove_contest · set_key · revoke_key · approve_application · reject_application)")
 
 
 def cmd_admin_issue(author, body):
