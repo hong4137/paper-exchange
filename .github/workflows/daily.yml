@@ -1,24 +1,30 @@
 name: exchange
-# 거래소의 정기 일: 주문 창구 접수 → 시세 갱신(하루·1분, 장전·장후 포함) → 체결 → 화면 자료 → 저장소에 올리기.
+# 거래소의 정기 일: 관리 창구·주문 창구 접수 → 시세 갱신(하루·1분, 장전·장후, 배당·분할) → 체결 → 화면 자료 → 자료 저장소에 올리기.
+# 이 저장소(엔진)는 공개라 실행 시간이 무제한이다. 자료(장부·시세·화면 자료·명단)는 비공개 저장소 hong4137/paper-exchange-data 에 있다.
+#   그 저장소를 비밀 DATA_TOKEN 으로 받아 와 그 안에서 돌리고, 결과도 그쪽에 올린다. 이 실행 기록에는 내용이 찍히지 않는다(run-quiet.sh).
 # 1분 시세는 최근 8일치만 받을 수 있으므로 이 실행이 며칠씩 멈추면 그 사이의 체결은 하루 시세로 어림된다.
 on:
   schedule:
     - cron: '7 * * * *'        # 매시 7분 (GitHub 예약은 몇 분~몇십 분 늦을 수 있다)
   workflow_dispatch:
   push:
-    branches: [main]         # 장부는 main 에만 있다 — 작업 가지에 올린 것으로는 돌지 않는다
+    branches: [main]
     paths:
       - 'broker/**'
       - 'config.json'
       - '.github/workflows/daily.yml'
-      - '.github/commit.sh'
+      - '.github/run-quiet.sh'
+      - '.github/commit-data.sh'
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ledger            # 장부에 쓰는 실행은 한 번에 하나만
   cancel-in-progress: false
+
+env:
+  PAPER_HOME: ${{ github.workspace }}/home
 
 jobs:
   run:
@@ -26,12 +32,19 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - name: 자료 저장소 받기
+        uses: actions/checkout@v4
+        with:
+          repository: hong4137/paper-exchange-data
+          token: ${{ secrets.DATA_TOKEN }}
+          path: home
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: 접수 · 시세 · 체결 · 화면 자료
-        run: python broker/broker.py daily
+        run: bash .github/run-quiet.sh daily python broker/broker.py daily
       - name: 장부 확인
-        run: python broker/broker.py verify
-      - name: 올리기
-        run: bash .github/commit.sh "거래소 갱신 $(TZ=Asia/Seoul date '+%m-%d %H:%M')"
+        run: bash .github/run-quiet.sh verify python broker/broker.py verify
+      - name: 자료 저장소에 올리기
+        if: always()
+        run: bash .github/commit-data.sh "거래소 갱신 $(TZ=Asia/Seoul date '+%m-%d %H:%M')"

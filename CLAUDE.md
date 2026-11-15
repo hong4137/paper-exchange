@@ -12,43 +12,52 @@
 이 폴더의 목표(사용자 2026-11-14): **실제 상황급 시뮬레이션** + **지켜보기 편하게**.
 
 ## 저장소 (2026-11-14 올림)
-- 거래소: `hong4137/paper-exchange` (**공개**). 일지: `hong4137/paper-journal` (비공개).
+- 거래소 엔진: `hong4137/paper-exchange` (**공개**). 거래소 자료: `hong4137/paper-exchange-data` (**비공개**). 일지: `hong4137/paper-journal` (비공개).
+- **두 저장소로 나눔**(사용자 2026-11-15: "자동으로 돌아야 하는 것은 공개, 나머지는 비공개 — 자동 수치가 영향 받지 않으면서"):
+  엔진(프로그램·규칙·요율·시험·자동 실행)은 공개라 실행 시간이 무제한이다. 장부·명단(`players.json`: 참가자·대회)·시세·화면 자료·창구·실행 기록은 자료 저장소에만 둔다.
+  엔진의 자동 실행이 자료 저장소를 비밀 `DATA_TOKEN` 으로 받아 `home/` 에 두고 `PAPER_HOME=home` 으로 돌린 뒤 거기에 올린다(`.github/commit-data.sh`).
+  **공개 실행 기록에 내용이 찍히면 안 된다** — 명령 출력은 `.github/run-quiet.sh` 로 자료 저장소의 `logs/` 에만 남기고, 공개 쪽에는 끝·실패만 적는다. 실행에 `echo`·`cat` 으로 자료를 찍지 않는다.
+  자료 저장소의 `relay.yml` 은 `inbox/`·`admin/` 에 요청이 오면 비밀 `RELAY_TOKEN` 으로 엔진의 `order-window` 를 깨운다(`repository_dispatch` `orders`).
+  `config.json`(엔진)에는 규칙만, 명단·대회는 자료 저장소의 `players.json` 이 덮어쓴다(`broker.config()`). 나누기 전 공개 저장소의 지난 기록에는 그날까지의 자료가 남아 있다.
 - 이 PC 의 로그인 관리 프로그램에 GitHub 계정이 여러 개라, 원격 주소에 계정 이름을 넣어 두었다(`https://hong4137@github.com/...`). 빼면 올릴 때마다 계정 선택 창이 떠서 멈춘다.
 - `.github/workflows/probe.yml`: 올릴 때마다 시험과 시세 원천 확인(`tests/probe_sources.py`)을 GitHub 쪽에서 돌린다.
   2026-11-14 첫 실행에서 야후·네이버·다음 일곱 군데가 **GitHub 에서도 전부 열렸다.**
-- 공개 저장소다. 결정문·보고서·토큰·운용자 자료를 여기에 넣지 않는다.
+- 공개 저장소다. 결정문·보고서·토큰·운용자 자료·장부·명단(이메일)을 여기에 넣지 않는다.
 - **클라우드 세션의 올리기**(사용자 2026-11-15): 작업 가지에 올리고 PR 을 낸 뒤, 시험이 통과하면 **묻지 않고 바로 합친다**(PR 은 바뀐 기록으로 남긴다). `main` 에 직접 올리지는 않는다.
   화면(`docs/*.html`)·문지기(`site/`)·`wrangler.jsonc` 가 바뀌어 `main` 에 들어가면 `site-deploy` 자동 실행이 sharktalk 에 다시 올린다(사용자 2026-11-15: "로컬 방에 옮겨 주는 일을 없애 달라").
   합친 뒤 그 실행이 성공했는지(올리기와 "로그인 없이 막히는지") 확인하고 결과를 알린다. 저장소에 `CLOUDFLARE_API_TOKEN` 이 없으면 올리지 않으니, 그때는 PC 에서 올려야 한다고 알린다.
 
 ## 클라우드에서 돈다 — 장부는 거래소만 쓴다 (2026-11-14)
-사용자 구도: **선수는 로컬에, 경기장은 클라우드에.** 거래소는 GitHub 자동 실행으로 돌고, 장부(`ledger/`)·시세(`data/`)·화면 자료(`docs/data/`)는 자동 실행만 쓴다.
+사용자 구도: **선수는 로컬에, 경기장은 클라우드에.** 거래소는 GitHub 자동 실행으로 돌고, 장부(`ledger/`)·시세(`data/`)·화면 자료(`docs/data/`)는 자동 실행만 쓴다. 이 자료는 모두 자료 저장소에 있다(아래 경로는 그 저장소 안의 경로).
 - `config.json` 의 `"ledger_writer": "cloud"` 가 잠금이다. 이 PC 에서 `open·order·cancel·ingest·update·settle·build·daily` 를 돌리면 거절된다(시험 폴더 `PAPER_HOME` 은 예외). `status`·`verify` 는 된다.
 - **주문 창구 `inbox/`**: 운용자(일지 도구)가 요청 파일을 올리면 `order-window` 실행이 바로 접수한다. 접수 시각 = 거래소가 받은 시각. 요청 시각은 `requested_at` 로 따로 남는다.
   받지 않은 요청도 사유와 함께 장부에 `refuse` 줄로 남고 `state.json` 의 `refused` 로 나간다. 같은 요청(`client_id`)은 두 번 받지 않는다. 처리한 파일은 창구에서 지운다.
   요청 파일: `{"client_id", "action": "order"|"cancel", "ref", "symbol", "side", "type", "qty"|"krw", "price", "session", "valid_days", "requested_at"}` / 취소는 `{"client_id", "action": "cancel", "order", "why"}`.
   환전 요청은 같은 모양에 `"symbol": "USDKRW"`(또는 `"USD"`): 달러 사기 `{"side": "buy", "krw": 3000000}` 또는 `{"side": "buy", "usd": 2000}`, 달러 팔기 `{"side": "sell", "usd": 500 | "all"}`.
 - 자동 실행 (`.github/workflows/`):
-  - `daily.yml`(이름 exchange) — 매시 7분, 그리고 `main` 의 `broker/`·`config.json` 이 바뀔 때: 창구 접수 → 시세 갱신(배당·분할 자료 포함) → 체결·배당·분할 → 화면 자료 → 올리기
-  - `ingest.yml`(order-window) — `inbox/` 에 요청이 올라올 때: 접수 → 화면 자료 → 올리기. `inbox/*.json` 은 주인 계좌, `inbox/{계정}/*.json` 은 그 참가자 계좌
-  - `issue-window.yml` — 제목이 `[주문]`(참가자의 주문) 또는 `[관리]`(주인의 관리 명령)로 시작하는 이슈가 열릴 때: 접수 → 화면 자료 → 올리기 → 답글 달고 이슈 닫기
+  - `daily.yml`(이름 exchange) — 매시 7분, 그리고 `main` 의 `broker/`·`config.json` 이 바뀔 때: 관리 창구 → 창구 접수 → 시세 갱신(배당·분할 자료 포함) → 체결·배당·분할 → 화면 자료 → 자료 저장소에 올리기
+  - `ingest.yml`(order-window) — 자료 저장소의 relay 가 깨울 때(`inbox/`·`admin/` 에 요청): 관리 창구 → 접수 → 화면 자료 → 올리기. `inbox/*.json` 은 주인 계좌, `inbox/{계정}/*.json` 은 그 참가자 계좌
+  - (주문·관리 이슈를 받던 `issue-window.yml` 은 2026-11-15 `retired/` 로 옮겼다 — 이슈는 공개라 포트폴리오·이메일이 보인다)
   - `premarket.yml`(kr-premarket) — 평일 07:55: 한국 장전 시세 모으기 (`broker/live.py`). 한국 종목이 없으면 바로 끝난다
   - `probe.yml` — `broker/`·`tests/` 가 바뀔 때: 시험과 시세 원천 확인
   - `deploy.yml`(site-deploy) — `main` 의 화면·문지기·`wrangler.jsonc` 가 바뀔 때: 시험 → sharktalk 에 올리기 → 로그인 없이 전부 401 인지 확인. 열쇠는 저장소 비밀 `CLOUDFLARE_API_TOKEN`
-  - 장부에 쓰는 실행은 `concurrency: ledger` 로 한 번에 하나만 돈다. 올리기는 `.github/commit.sh`.
+  - 장부에 쓰는 실행은 `concurrency: ledger` 로 한 번에 하나만 돈다. 올리기는 `.github/commit-data.sh`(자료 저장소로).
   - `exchange`·`order-window` 는 `main` 에 올린 것으로만 돈다(작업 가지에서는 돌지 않는다 — 가지에 자료가 쌓이면 합칠 때 부딪힌다). `probe` 는 어느 가지에서나 돈다.
-    `issue-window` 는 이슈가 열릴 때 돌고 언제나 `main` 의 코드를 쓴다.
-- 코드를 고친 뒤에는 시험(임시 폴더)만 이 PC 에서 돌리고, 올리면 클라우드가 실제 장부로 돈다. **올리기 전에 `git pull --rebase`** — 클라우드가 그사이 자료를 올렸을 수 있다.
+- 코드를 고친 뒤에는 시험(임시 폴더)만 이 PC 에서 돌리고, 올리면 클라우드가 실제 장부로 돈다. 장부를 보려면 자료 저장소를 받아 `PAPER_HOME` 으로 주고 `status`·`verify` 만 쓴다(쓰는 명령은 돌리지 않는다).
 - GitHub 예약 실행은 늦게 시작될 수 있다. 1분 시세가 8일치뿐이므로 정기 실행이 며칠 멈추면 그 사이 체결은 하루 시세로 어림된다.
 
 ## 구조
 ```
-config.json           대회 이름(`league`), 참가자 명단(`players`), 계좌 이름, 시작 금액, 비용 요율(`fees`), 달러 부족 때 처리(`usd_shortfall`), 비교 기준, 체결 가정값, 규칙 문장 (화면에 그대로 나온다)
+config.json           (엔진) 계좌 이름, 시작 금액, 비용 요율(`fees`), 달러 부족 때 처리(`usd_shortfall`), 비교 기준, 체결 가정값, 규칙 문장 (화면에 그대로 나온다)
 broker/broker.py      장부·주문 접수·환전·비용·배당·분할·평가·화면 자료 (명령과 장부 줄 종류는 파일 머리 설명 참조)
 broker/matching.py    체결 엔진 — 1분 시세로 주문이 언제·얼마에·몇 주 체결되는지 계산 (규칙은 파일 머리 설명)
 broker/prices.py      시세 수집 — 하루: 미국·환율 야후, 한국 다음 금융(정규장 종가) / 1분(장전·장후 포함): 미국·환율 야후, 한국 네이버
                       배당·액면분할: 야후 events (한국은 `{코드}.KS` → `.KQ`, 종류와 최근 종가가 우리 시세와 맞는 쪽만). 한국 종목이 ETF 인지: 같은 응답의 종목 종류 → 없으면 이름으로 어림
 broker/live.py        한국 장전(08:00~08:50)을 그 시간에 직접 모으는 수집기 — 평일 아침에 돌려야 한다 (아직 실전 확인 전)
+── 아래 자료는 자료 저장소(paper-exchange-data)에 있다 ──
+players.json          참가자 명단(`players`, 이메일 포함)과 대회(`league`) — config.json 위에 덮인다. 관리 창구만 고친다
+admin/                관리 창구 — 관리자 화면의 요청 파일이 처리 전까지 머문다. 결과는 docs/data/admin_log.json
+logs/                 자동 실행의 출력 (last-이름.log, 실패 모음 failures.log)
 accounts/{계정}/ledger.jsonl  다른 참가자의 장부 (계정 = GitHub 계정 이름 소문자). 주인 계좌는 아래 예전 자리 그대로
 ledger/ledger.jsonl   주인 계좌의 장부 (개설·주문·취소·체결·거부·만료·환전·배당·분할). 줄 추가만. 줄마다 앞줄의 지문(sha256)을 품는다
 data/prices/          하루 시세 캐시 (끝난 거래일만) — 평가와 거래일 달력에 쓴다. 종목 파일에는 배당·분할(`events`)과 ETF 여부(`kind`)도 쌓인다
@@ -74,7 +83,8 @@ tests/test_league.py  여러 참가자 시험 (계좌 분리, 주문 이슈와 �
 tests/make_demo_real.py 실제 1분 시세에 가짜 주문을 넣어 demo.json 을 만든다 (네트워크 필요, 날짜는 최근 거래일로)
 tests/probe_sources.py 시세·배당·분할 원천이 열리는지 확인 (아무것도 저장하지 않는다)
 inbox/                주문 창구 — 운용자가 올린 주문 요청 파일이 접수 전까지 잠깐 머문다
-.github/              자동 실행 다섯 가지, 올리기 스크립트, 이슈 양식(ISSUE_TEMPLATE/order.md 주문, admin.md 관리)
+.github/              (엔진) 자동 실행, 조용히 돌리기(run-quiet.sh), 자료 저장소에 올리기(commit-data.sh)
+retired/              (엔진) 쓰지 않게 된 이슈 창구·이슈 양식·옛 올리기 스크립트
 운용자/               ⚠ 운용자의 생각(운용-준비서.md, 승인서-성적표.md) — 거래소 것이 아니다. 분리 전에 여기 만들어졌다.
                       `../모의투자-일지/` 로 옮겨야 한다(운용자 쪽 방이 옮긴다). 그때까지 저장소에 올리지 않는다(.gitignore).
 .env                  ⚠ 텔레그램 토큰 — 이제 일지의 것이다. 일지 도구가 여기서도 찾아 쓰지만 `../모의투자-일지/.env` 로 옮기는 것이 맞다.
@@ -101,21 +111,20 @@ inbox/                주문 창구 — 운용자가 올린 주문 요청 파일
   계좌별 화면 자료의 `performance`: 기간별 수익률(최근 1주·1개월·3개월·6개월·1년·올해·처음부터, 비교 기준과 나란히), 최대 낙폭, 가장 좋았던 날·나빴던 날, 하루 수익률의 흔들림.
   계좌가 그 기간보다 젊으면 그 줄은 내지 않는다(짧은 기간을 긴 기간인 것처럼 보이지 않게).
   입출금 기능을 넣게 되면 이 계산을 고쳐야 한다(돈이 드나든 날을 끊어서 재야 한다).
-- **대회**: `config.json` 의 `league.contests` 에 `{"name", "start", "end"}` 를 적으면(지금은 비어 있다) 같은 자산 곡선에서 그 기간의 수익률과 순위를 따로 낸다(`league.json` 의 `contests`).
+- **대회**: `players.json` 의 `league.contests` 에 `{"name", "start", "end"}` 를 적으면(지금은 비어 있다) 같은 자산 곡선에서 그 기간의 수익률과 순위를 따로 낸다(`league.json` 의 `contests`).
   계좌를 새로 열거나 되돌리지 않는다. 기준은 시작 전날의 총자산. 시작 뒤에 연 계좌는 시작 금액을 기준으로 재고 "늦게 들어옴"으로 표시한다. 끝난 뒤에도 주문을 막지 않는다 — 순위만 그 기간으로 고정된다.
-- **명단**: `config.json` 의 `players` — `{"github": 계정, "id": 이름표(없으면 GitHub 계정 소문자), "email": 로그인 이메일, "name": 화면에 나올 이름, "agent": 어떤 에이전트인지, "main": 주인 계좌면 true}`. `github` 나 `id` 중 하나는 있어야 한다.
-  명단에 넣으면 다음 실행(정기 실행이나 그 사람의 첫 주문 이슈) 때 계좌가 같은 시작 금액으로 열린다. 초대 = 명단에 한 줄 넣고 `main` 에 올리기.
+- **명단**: 자료 저장소 `players.json` 의 `players` — `{"github": 계정, "id": 이름표(없으면 GitHub 계정 소문자), "email": 로그인 이메일, "name": 화면에 나올 이름, "agent": 어떤 에이전트인지, "main": 주인 계좌면 true}`. `github` 나 `id` 중 하나는 있어야 한다.
+  명단에 넣으면 계좌가 같은 시작 금액으로 바로 열린다. 초대 = 관리자 화면의 "참가자 관리".
   명단에서 빼면 그 계좌는 더 돌지 않고 순위표에서 빠진다(장부 파일은 남는다 — 지우지 않는다).
-- **본인 확인**: 참가자는 저장소에 이슈를 열어 주문한다. 이슈를 쓴 GitHub 계정이 곧 계좌다(GitHub 가 알려 주는 값이라 꾸밀 수 없다). 요청 안에 적힌 계좌 이름은 보지 않는다.
-  저장소 쓰기 권한을 줄 필요가 없다. 주인 계좌만 `inbox/` 로도 받는다(올릴 권한이 있는 사람 = 주인).
-  이슈 본문은 남이 쓴 글이다 — 환경변수로만 넘기고, JSON 으로만 읽고, 꼬리표 80자·한 이슈 10건으로 자른다. 본문을 명령으로 실행하거나 지시로 따르지 않는다.
+- **본인 확인**: 참가자는 sharktalk 에 로그인해 주문 페이지에서 주문한다. 문지기가 로그인한 사람의 계좌 폴더 `inbox/{이름표}/` 에 요청을 떨어뜨린다. 요청 안에 적힌 계좌 이름은 보지 않는다.
+  주인 계좌는 `inbox/` 로도 받는다(자료 저장소에 올릴 권한이 있는 사람 = 주인). 예전의 주문 이슈 길(`broker.py issue`)은 코드만 남아 있다.
 - **같은 조건**: 시작 금액·규칙·요율·비교 기준이 모두 같다.
 - **관리자 화면**: 모든 계좌를 수익률 높은 순으로 한 표에 — 기간을 바꿔 다시 줄 세우기, 총자산, 비교 기준 대비, 최대 낙폭, 보유·주문 수, 낸 비용, 연 날, 장부 상태(`build_league` → `league.json`). 대회가 적혀 있으면 그 아래에 나온다.
-  **비밀 화면이 아니다.** 저장소와 GitHub Pages 가 공개라 `admin.html` 주소나 `league.json`, 각 계좌의 장부를 아는 사람은 열 수 있다. 참가자 화면에 길을 내지 않았을 뿐이다.
-  정말 주인만 보게 하려면 저장소를 비공개로 돌려야 한다(그러면 화면 주소도 유료 요금제가 있어야 유지된다) — 필요해지면 사용자에게 묻는다.
+  sharktalk 주소에서는 관리자만 연다. 자료가 비공개 저장소로 옮겨져 GitHub Pages 쪽 화면(`admin.html` 등)에는 이제 자료가 없다.
 - 시세(`data/`)는 함께 쓴다. `update·settle·build·daily·verify` 는 모든 계좌를 돌고, 한 계좌만 다루려면 `--account 계정`.
-- **관리 명령**(사용자 결정 2026-11-14: 관리자가 참가자를 넣고 빼게): 주인 계정으로 제목이 `[관리]` 인 이슈를 연다. 주인 계정이 아니면 받지 않는다(`owner_login`: `league.owner` → 주인 계좌의 계정 → 저장소 주인).
-  `{"action": "add_player", "github", "name", "agent"}` · `remove_player` · `add_contest`(`name`, `start`, `end`) · `remove_contest`. `config.json` 을 고쳐 올리고, 새 참가자의 계좌를 바로 연다. 주인 계좌는 뺄 수 없다.
+- **관리 명령**(사용자 결정 2026-11-14: 관리자가 참가자를 넣고 빼게): 관리자 화면의 양식 → 문지기(관리자만) → 자료 저장소 `admin/*.json` → `broker.py admin-inbox`.
+  `{"action": "add_player", "id", "email", "name", "agent"}` · `remove_player` · `add_contest`(`name`, `start`, `end`) · `remove_contest`. `players.json` 을 고치고, 새 참가자의 계좌를 바로 연다. 주인 계좌는 뺄 수 없다.
+  결과는 `docs/data/admin_log.json`(최근 50건, 관리자만 읽는다) → 관리자 화면의 "최근 처리 결과".
 - **계좌별 주문 창구**: `inbox/{계정}/*.json` 은 그 계좌로 접수한다(요청 안의 계좌 이름은 보지 않는다). 로그인이 있는 화면이 생기면 그쪽이 본인 확인을 하고 이 폴더에 요청을 떨어뜨린다. 명단에 없는 폴더는 건드리지 않는다.
 - 명단·주문 이슈·같은 조건은 사용자가 고르지 않아 **내가 정한 기본값**이다. 바꾸려면 사용자에게 묻는다.
   실제로 대회를 열 때 물을 것: 대기 주문을 남에게 가릴지, 한 사람이 계좌를 여럿 가질 수 있는지, 대회용으로 새 계좌에서 다 같이 출발할지.
@@ -133,10 +142,10 @@ inbox/                주문 창구 — 운용자가 올린 주문 요청 파일
   거래소(GitHub 자동 실행·장부)는 그대로다. 로그인이 없는 GitHub Pages 에서도 화면은 예전처럼 돈다(`api/me` 가 없으면 양식이 안 나올 뿐).
 - **문지기가 하는 일**(`site/lib.mjs`):
   ① `AUTH_SVC` 의 `/me` 에 쿠키를 넘겨 로그인한 사람(이메일이나 아이디)을 받는다. 쿠키가 없거나 인증 워커가 모르면 들이지 않는다.
-  ② 로그인한 사람 → 계좌: 저장소 `config.json` 의 `players[].email` 또는 `players[].login`(sharktalk 아이디). 관리자는 비밀 설정 `ADMIN_EMAILS`(이메일이나 아이디)이고 주인 계좌의 주인으로 본다.
+  ② 로그인한 사람 → 계좌: 자료 저장소 `players.json` 의 `players[].email` 또는 `players[].login`(sharktalk 아이디). 관리자는 비밀 설정 `ADMIN_EMAILS`(이메일이나 아이디)이고 주인 계좌의 주인으로 본다.
   ③ `/data/…` 는 저장소에서 바로 읽어 준다 — 자기 계좌(`accounts/{이름표}.json`)만, `league.json`·`state.json`·`admin.html` 은 관리자만. 정해진 경로 말고는 아무것도 내주지 않는다.
   ④ `/api/order` → 저장소 `inbox/{이름표}/` 에 요청 파일을 올린다. 계좌는 로그인한 사람의 것, 요청 안의 계좌는 보지 않는다. 같은 화면에서 온 요청만 받는다.
-  ⑤ `/api/admin`(관리자만) → 저장소에 `[관리]` 이슈를 연다. 토큰 주인 = 거래소 주인이라 거래소가 주인의 명령으로 받는다.
+  ⑤ `/api/admin`(관리자만) → 자료 저장소 `admin/` 에 요청 파일을 올린다. `/data/admin_log.json` 도 관리자만 읽는다.
   (`AUTH_SVC` 가 없고 `ACCESS_TEAM`·`ACCESS_AUD` 가 있으면 Cloudflare Access 토큰으로 확인하는 길도 남아 있다 — sharktalk 밖에 올릴 때의 대안. sharktalk 에서는 쓰지 않는다.)
 - **실제 코드와 견줘 맞춘 것**(2026-11-15, `../sharktalk-auth/index.js`): `/me` 는 로그인 됨 = 200 `{authenticated: true, user: {email, name, role}}`, 안 됨 = 401.
   쿠키는 `st_session`(`Domain=.sharktalk.co.kr` — `exchange.` 에도 온다). 로그인 화면은 `auth.sharktalk.co.kr/login?next=`. **sharktalk 에는 이메일 말고 아이디가 없다** — 명단의 `login` 칸은 sharktalk 로그인에서 쓰이지 않는다.
@@ -148,7 +157,7 @@ inbox/                주문 창구 — 운용자가 올린 주문 요청 파일
 - **걸림돌**(조사로 확인): 개인 계정의 비공개 저장소는 협업자에게 쓰기 권한만 줄 수 있다(docs.github.com "Permission levels for a personal account repository") — 비공개가 되면 참가자는 주문 이슈를 못 열고 화면의 주문 양식으로 주문한다.
   비공개 저장소는 GitHub 자동 실행에 무료 한도가 있다(개인 계정 한 달 2,000분으로 알고 있다 — 확인 필요). 매시 실행 + 아침 장전 수집을 합치면 닿을 수 있다.
 - 화면 파일이나 문지기를 고치면 `main` 에 들어간 뒤 `site-deploy` 가 sharktalk 에 다시 올린다(자료는 다시 올릴 필요 없다). 열쇠(`CLOUDFLARE_API_TOKEN`)가 없거나 그 실행이 실패하면 PC 에서 올린다 — 명령은 `RESUME.md`.
-- 저장소를 비공개로 돌리기 전까지 GitHub Pages 쪽 `docs/admin.html` 은 잠기지 않은 화면이다(sharktalk 주소 쪽은 잠겨 있다).
+- 문지기는 자료 저장소(`GITHUB_REPO` = `hong4137/paper-exchange-data`)에서 읽고 쓴다. 열쇠 `GITHUB_TOKEN` 은 `site-deploy` 가 저장소 비밀 `DATA_TOKEN` 으로 맞춘다.
 
 ### 주문 페이지 (사용자 2026-11-15: "주문 내는 창은 종목 검색·종목 현황·글로벌 증시 현황과 같이 있어야 한다. 적어도 두 페이지는 분리")
 - 사용자 결정: **두 페이지**(내 계좌 `index.html` / 주문 `trade.html`, 위쪽 메뉴로 오간다) · 시세는 **볼 때마다 실시간** · 시장 현황은 **한국·미국 지수, 아시아·유럽 지수, 환율, 금리·원자재** 모두.

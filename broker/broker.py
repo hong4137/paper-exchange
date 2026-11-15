@@ -54,7 +54,8 @@ import prices as px  # noqa: E402
 import matching as mt  # noqa: E402
 
 KST = px.KST
-HOME = Path(os.environ.get("PAPER_HOME") or Path(__file__).resolve().parent.parent)
+CODE_ROOT = Path(__file__).resolve().parent.parent
+HOME = Path(os.environ.get("PAPER_HOME") or CODE_ROOT)
 LEDGER = HOME / "ledger" / "ledger.jsonl"
 STATE_OUT = HOME / "docs" / "data" / "state.json"
 LEAGUE_OUT = HOME / "docs" / "data" / "league.json"
@@ -69,8 +70,18 @@ def now():
     return datetime.fromisoformat(v).astimezone(KST) if v else datetime.now(KST)
 
 
+PRIVATE_KEYS = ("players", "league")       # 비공개 자료 쪽(players.json)에 두는 것 — 명단(이메일)·대회
+
+
 def config():
-    return json.loads((HOME / "config.json").read_text(encoding="utf-8"))
+    """거래소 설정. 규칙·요율·비교 기준은 config.json(공개 엔진 저장소에 있다 — 자료 폴더에 없으면 코드 옆 것),
+    명단·대회는 자료 폴더의 players.json(비공개 자료 저장소)이 있으면 그것으로 덮는다."""
+    base = HOME / "config.json" if (HOME / "config.json").exists() else CODE_ROOT / "config.json"
+    cfg = json.loads(base.read_text(encoding="utf-8"))
+    priv = HOME / "players.json"
+    if priv.exists():
+        cfg.update({k: v for k, v in json.loads(priv.read_text(encoding="utf-8")).items() if k in PRIVATE_KEYS})
+    return cfg
 
 
 # ---------- 계좌 (참가자) ----------
@@ -1227,7 +1238,9 @@ def owner_login(cfg):
 
 
 def _save_config(cfg):
-    (HOME / "config.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    """관리 명령으로 바뀐 명단·대회를 자료 폴더의 players.json 에 쓴다 (규칙·요율이 든 config.json 은 건드리지 않는다)."""
+    (HOME / "players.json").write_text(json.dumps({k: cfg.get(k) for k in PRIVATE_KEYS if k in cfg}, ensure_ascii=False, indent=2) + "\n",
+                                       encoding="utf-8")
 
 
 def _day(v):
@@ -1323,6 +1336,44 @@ def cmd_admin_issue(author, body):
         open_missing()
     roster = ", ".join(f"{x['name']}(`{x['id']}`)" for x in accounts())
     return lines + ["", f"지금 명단: {roster}"]
+
+
+ADMIN_LOG = HOME / "docs" / "data" / "admin_log.json"
+
+
+def cmd_admin_inbox(a):
+    """관리 창구: 자료 폴더의 admin/*.json 을 이름 순서대로 처리한다 (sharktalk 관리자 화면이 올린다 — 관리자 확인은 거기서 끝났다).
+    결과는 docs/data/admin_log.json(관리자 화면에 나온다)에 남기고 파일은 치운다."""
+    box = HOME / "admin"
+    files = sorted(box.glob("*.json")) if box.exists() else []
+    if not files:
+        return
+    cfg = config()
+    log = json.loads(ADMIN_LOG.read_text(encoding="utf-8")) if ADMIN_LOG.exists() else []
+    changed = False
+    for f in files:
+        try:
+            req = json.loads(f.read_text(encoding="utf-8"))
+            if not isinstance(req, dict):
+                raise ValueError
+        except Exception:
+            req = None
+        try:
+            if req is None:
+                raise Refused("요청 파일을 읽을 수 없습니다")
+            msg, ok = admin_do(cfg, req), True
+            changed = True
+        except Refused as e:
+            msg, ok = f"하지 않았습니다 — {e}", False
+        log.append({"at": now().isoformat(timespec="seconds"), "action": (req or {}).get("action"), "ok": ok,
+                    "text": msg.replace("`", ""), "requested_at": (req or {}).get("requested_at")})
+        f.unlink()
+    if changed:
+        _save_config(cfg)
+        open_missing()
+    ADMIN_LOG.parent.mkdir(parents=True, exist_ok=True)
+    ADMIN_LOG.write_text(json.dumps(log[-50:], ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"관리 창구: {len(files)}건")
 
 
 def cmd_issue(a):
@@ -1442,8 +1493,9 @@ def cmd_build(a):
 def cmd_daily(a):
     use(pick(None))
     need_open(replay(read_ledger()))
+    cmd_admin_inbox(a)                                    # 관리 창구 (참가자 넣고 빼기·대회)
     open_missing()                                        # 명단에 새로 들어온 참가자의 계좌를 연다
-    cmd_ingest(a)                                         # 주인 계좌의 창구 (다른 참가자는 주문 이슈로 들어온다)
+    cmd_ingest(a)                                         # 주문 창구 (주인 inbox/, 참가자 inbox/{이름표}/)
     print("가격 갱신"); cmd_update(a)
     print("체결"); cmd_settle(a)
     cmd_build(a)
@@ -1490,12 +1542,13 @@ def main():
     s.set_defaults(f=cmd_cancel)
     sub.add_parser("ingest").set_defaults(f=cmd_ingest)
     sub.add_parser("issue").set_defaults(f=cmd_issue)
+    sub.add_parser("admin-inbox").set_defaults(f=cmd_admin_inbox)
     for n, f in [("update", cmd_update), ("settle", cmd_settle), ("build", cmd_build),
                  ("daily", cmd_daily), ("status", cmd_status), ("verify", cmd_verify)]:
         sub.add_parser(n).set_defaults(f=f)
     a = p.parse_args()
     # 장부는 거래소 한 곳만 쓴다: 클라우드가 쓰기로 정해져 있으면 이 PC 에서는 읽기만 한다 (시험 폴더는 예외)
-    writes = {"open", "order", "cancel", "ingest", "issue", "update", "settle", "build", "daily"}
+    writes = {"open", "order", "cancel", "ingest", "issue", "admin-inbox", "update", "settle", "build", "daily"}
     if (a.cmd in writes and config().get("ledger_writer") == "cloud" and not os.environ.get("GITHUB_ACTIONS")
             and not os.environ.get("PAPER_HOME")):
         sys.exit("이 장부는 클라우드 거래소(GitHub 자동 실행)만 씁니다. 주문은 일지 도구로 요청하고, 상태는 git pull 로 받아 보세요.")
