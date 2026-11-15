@@ -247,7 +247,7 @@ export async function quote(symRaw, fetchFn = fetch, nowSec = Math.floor(Date.no
     const session = rt.ext && rt.ext.open ? rt.ext.session : /OPEN/.test(rt.status) && hm >= 900 && hm <= 1530 ? 'r' : 'closed';
     const tick = inferTick(bars.map((b) => b[1]));
     return { symbol: sym, market: 'KR', currency: 'KRW', name: rt.name || sym, price: rt.price, prev: rt.prev, ...chg(rt.price, rt.prev),
-             open: rt.open, high: rt.high, low: rt.low, volume: rt.volume, session, ext: rt.ext && { ...rt.ext, ...chg(rt.ext.price, rt.prev) },
+             open: rt.open, high: rt.high, low: rt.low, volume: rt.volume, session, ext: rt.ext && { ...rt.ext, ...chg(rt.ext.price, rt.price) },      // 시간외 등락은 정규장 종가 대비 (내 계좌 화면과 같은 기준)
              tick, limits: rt.prev ? { up: Math.floor(rt.prev * 1.3), down: Math.ceil(rt.prev * 0.7) } : null,
              bars: bars.map((b) => [b[0], b[1]]), at: nowSec };
   }
@@ -264,7 +264,7 @@ export async function quote(symRaw, fetchFn = fetch, nowSec = Math.floor(Date.no
   return { symbol: sym, market: 'US', currency: 'USD', name: c.name || sym, exchange: c.exchange, kind: c.type === 'ETF' ? 'ETF' : null,
            price: c.price, prev: c.prev, ...chg(c.price, c.prev),
            open: reg.length ? reg[0][3] ?? reg[0][1] : null, high: c.dayHigh, low: c.dayLow, volume: c.volume, session,
-           ext: ext && { ...ext, ...chg(ext.price, c.prev) }, tick: 0.01, limits: null,
+           ext: ext && { ...ext, ...chg(ext.price, c.price) }, tick: 0.01, limits: null,      // 시간외 등락은 정규장 종가 대비
            bars: thin2(c.bars, 400), at: nowSec };
 }
 

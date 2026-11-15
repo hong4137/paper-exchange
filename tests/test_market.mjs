@@ -71,7 +71,7 @@ M._resetMarket();
 routes['polling.finance.naver.com/api/realtime/domestic/stock/005930'] = { datas: [{ stockName: '삼성전자', closePrice: '209,000', compareToPreviousClosePrice: '-1,000',
   marketStatus: 'CLOSE', overMarketPriceInfo: { tradingSessionType: 'AFTER_MARKET', overMarketStatus: 'OPEN', overPrice: '207,500', fluctuationsRatio: '-1.19' } }] };
 q = await M.quote('005930', fetchFn, NOW + 8 * 3600);
-check('장후(넥스트레이드)가 열려 있으면 "장후"와 그 가격', q.session === 'post' && q.ext.price === 207500 && q.ext.chg === -2500, JSON.stringify(q.ext));
+check('장후(넥스트레이드)가 열려 있으면 "장후"와 그 가격, 등락은 정규장 종가(209,000) 대비', q.session === 'post' && q.ext.price === 207500 && q.ext.chg === -1500 && q.ext.chg_pct === -0.72, JSON.stringify(q.ext));
 
 console.log('종목 현황 — 미국');
 M._resetMarket();
@@ -82,7 +82,7 @@ check('미국 종목: 정규장, 등락', q.symbol === 'MU' && q.market === 'US'
 M._resetMarket();
 routes[`/chart/MU?`] = yChart('MU', { price: 101, prev: 100, closes: [100, 101, 103], start: US_REG.end - 60, periods: US_PER });
 q = await M.quote('MU', fetchFn, US_REG.end + 1800);
-check('장후 1분 시세가 있으면 장후 가격을 따로', q.session === 'post' && q.ext && q.ext.price === 103 && q.ext.session === 'post' && q.ext.chg_pct === 3, JSON.stringify(q.ext));
+check('장후 1분 시세가 있으면 장후 가격을 따로, 등락은 정규장 종가(101) 대비', q.session === 'post' && q.ext && q.ext.price === 103 && q.ext.session === 'post' && q.ext.chg === 2 && q.ext.chg_pct === 1.98, JSON.stringify(q.ext));
 M._resetMarket();
 routes[`/chart/SONY?`] = yChart('SONY', { price: 3000, prev: 2900, closes: [3000], start: NOW, currency: 'JPY' });
 let err = null; try { await M.quote('SONY', fetchFn, NOW); } catch (e) { err = e.message; }
