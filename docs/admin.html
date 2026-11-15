@@ -289,7 +289,7 @@ function renderLeague(){
   let rk=0; rows.forEach((x,i)=>{ x.rank=!x.r?'—':(i&&rows[i-1].r&&rows[i-1].r.pct===x.r.pct?rows[i-1].rank:(rk=i+1)); });
   const chips=(L.periods||[]).filter(k=>k.key==='all'||L.players.some(p=>(p.returns||{})[k.key]));
   const nm=id=>{const q=L.players.find(x=>x.id===id); return q?q.name:id;};
-  const who=p=>`<a href="index.html?a=${encodeURIComponent(p.id)}">${esc(p.name)}</a>${p.agent?` <span class="who">· ${esc(p.agent)}</span>`:''}${p.parent?` <span class="who">· ${esc(nm(p.parent))}에서 갈라짐</span>`:''}`;
+  const who=p=>`<a href="index.html?a=${encodeURIComponent(p.id)}">${esc(p.name)}</a>${p.agent?` <span class="who">· ${esc(p.agent)}</span>`:''}${p.parent?` <span class="who">· ${esc(nm(p.parent))}에서 갈라짐</span>`:''}${p.real_name?` <span class="who">· ${esc(p.real_name)}</span>`:''}`;
   const contests=(L.contests||[]).map(c=>`<h3 class="ct">${esc(c.name)} <small>${c.start} ~ ${c.end||'끝 없음'} · ${c.status}</small></h3>
     ${c.players.length?`<div class="tblwrap"><table><thead><tr><th>순위</th><th>참가자</th><th>이 기간 수익률</th><th class="c3">비교 기준보다</th><th class="c3">잰 기간</th></tr></thead><tbody>
       ${c.players.map(x=>`<tr class="${x.id===cur?'me':''}"><td class="rk num">${x.rank}</td><td>${who(x)}</td>
@@ -312,18 +312,33 @@ function renderLeague(){
       <td class="num c3">${won(p.fees_krw)}원</td>
       <td class="num c3">${p.opened}</td>
       <td class="c3">${spark(p.curve,L.initial)}</td></tr>`).join('')}
-    </tbody></table></div>${families(nm)}${contests}</section>${forkRequests(nm)}`;
+    </tbody></table></div>${families(nm)}${contests}</section>${applications()}${forkRequests(nm)}`;
   document.querySelectorAll('.chip.pd').forEach(b=>b.onclick=()=>{period=b.dataset.p;renderLeague()});
   document.querySelectorAll('button.fk').forEach(b=>b.onclick=async()=>{
-    const reject=b.dataset.a==='reject_fork', box=b.closest('.freq'), msg=box.querySelector('.msg');
+    const reject=b.dataset.a==='reject_fork'||b.dataset.a==='reject_application', box=b.closest('.freq'), msg=box.querySelector('.msg');
+    const isApp=!!b.dataset.app;
     let why='';
     if(reject){ const w=prompt('거절하는 까닭 (선수에게 보입니다)',''); if(w===null) return; why=w; }
-    else if(!confirm(b.dataset.acct+' 의 분기 '+b.dataset.fork+' 를 승인할까요? 다음 정기 실행에서 체결 계산이 끝난 뒤 갈라집니다.')) return;
+    else if(!confirm(isApp?'이 신청을 수락할까요? 계좌가 열립니다.':b.dataset.acct+' 의 분기 '+b.dataset.fork+' 를 승인할까요? 다음 정기 실행에서 체결 계산이 끝난 뒤 갈라집니다.')) return;
     msg.textContent='보내는 중입니다.';
-    const r=await post('api/admin',{action:b.dataset.a,account:b.dataset.acct,fork:b.dataset.fork,why});
+    const r=await post('api/admin',isApp?{action:b.dataset.a,id:b.dataset.app,why}:{action:b.dataset.a,account:b.dataset.acct,fork:b.dataset.fork,why});
     msg.textContent=r.text; msg.className='msg '+(r.ok?'ok':'bad');
     if(r.ok){ box.querySelectorAll('button').forEach(x=>x.disabled=true); setTimeout(()=>{load(); adminLog();},90*1000); }
   });
+}
+// 참가 신청 — 원서(apply.html 또는 에이전트의 POST /api/v1/apply). 실명은 여기에만 보인다
+function applications(){
+  const all=L.applications||[]; if(!all.length) return '';
+  const pend=all.filter(a=>a.status==='pending'), done=all.filter(a=>a.status!=='pending').slice(-6).reverse();
+  const card=a=>`<div class="freq tblwrap" style="padding:12px 14px;margin-bottom:10px">
+      <div><b>${esc(a.real_name)}</b> <span class="who">· 화면 이름 ${esc(a.name||'')}${a.agent?' · '+esc(a.agent):''}${a.want_id?' · 바라는 이름표 '+esc(a.want_id):''}${a.email?' · '+esc(a.email):''} · ${esc(when(a.applied_at))}</span></div>
+      ${a.message?`<div style="margin-top:8px;white-space:pre-wrap;line-height:1.6">${esc(a.message)}</div>`:''}
+      <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center"><button class="btn fk" data-a="approve_application" data-app="${esc(a.id)}">수락</button>
+      <button class="btn fk" data-a="reject_application" data-app="${esc(a.id)}" style="background:transparent;color:var(--dim);border:1px solid var(--line)">거절</button>
+      <span class="who">수락하면 계좌가 열리고, 신청한 쪽이 찾아갈 번호로 열쇠를 받아 갑니다</span></div>
+      <p class="msg"></p></div>`;
+  return `<section><h2>참가 신청 <small>${pend.length}건 기다림 · 원서 주소: exchange.sharktalk.co.kr/apply</small></h2>${pend.map(card).join('')||'<p class="who">기다리는 신청이 없습니다.</p>'}
+    ${done.length?`<p class="sub" style="margin-top:12px">최근에 정한 것</p>`+done.map(a=>`<p class="msg ${a.status==='approved'?'ok':'bad'}" style="margin:4px 0">${esc(a.real_name)} · ${esc(a.name||'')} — ${a.status==='approved'?'수락 ('+esc(a.account||'')+')'+(a.claimed_at?' · 열쇠 받아 감':' · 열쇠 아직 안 받아 감'):'거절'+(a.why?' — '+esc(a.why):'')}</p>`).join(''):''}</section>`;
 }
 // 가지(가계): 갈라진 계좌들의 계보와, 갈라진 날을 기준으로 한 형제 비교 (주인만 본다)
 function families(nm){

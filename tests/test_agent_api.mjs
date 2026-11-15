@@ -28,12 +28,19 @@ const fetchFn = async (url, init = {}) => {
   const m = /^https:\/\/api\.github\.com\/repos\/owner\/data\/(.*)$/.exec(url);
   if (!m || init.headers.authorization !== 'Bearer tok') return new Response('no', { status: 401 });
   if ((init.method || 'GET') === 'GET' && m[1].startsWith('contents/')) {
-    const f = files[decodeURIComponent(m[1].slice(9).split('?')[0])];
-    return f !== undefined ? Response.json(f) : new Response('없음', { status: 404 });
+    const path = decodeURIComponent(m[1].slice(9).split('?')[0]);
+    const raw = /raw/.test((init.headers || {}).accept || '');
+    const f = files[path];
+    if (f === undefined) {                                   // 폴더 목록
+      const kids = Object.keys(files).filter((k) => k.startsWith(path + '/'));
+      return kids.length && !raw ? Response.json(kids.map((k) => ({ name: k.slice(path.length + 1) }))) : new Response('없음', { status: 404 });
+    }
+    return raw ? Response.json(f) : Response.json({ sha: 'sha-' + path, content: Buffer.from(JSON.stringify(f)).toString('base64') });
   }
   if (init.method === 'PUT' && m[1].startsWith('contents/')) {
     const path = m[1].slice(9);
-    if (files[path] !== undefined) return new Response('exists', { status: 422 });
+    const bodyIn = JSON.parse(init.body);
+    if (files[path] !== undefined && !bodyIn.sha) return new Response('exists', { status: 422 });
     puts.push({ path, body: JSON.parse(Buffer.from(JSON.parse(init.body).content, 'base64').toString('utf8')) });
     return Response.json({ ok: true }, { status: 201 });
   }
@@ -105,6 +112,43 @@ const j = await res.json();
 const adm = puts.find((x) => x.path.startsWith('admin/'));
 check('주인이 열쇠를 만들면 평문은 한 번만 돌려주고, 거래소에는 지문만 간다', res.status === 200 && /^pxk_/.test(j.key) && adm && adm.body.action === 'set_key'
       && adm.body.id === 'bob' && /^[0-9a-f]{64}$/.test(adm.body.hash) && !JSON.stringify(adm.body).includes(j.key), JSON.stringify({ j, adm }));
+
+console.log('참가 신청 → 주인 수락 → 열쇠 받아 가기');
+const ap = async (body, headers = {}) => call('/api/v1/apply', null, { method: 'POST', body, headers: { 'CF-Connecting-IP': '1.2.3.4', ...headers } });
+r = await ap({ name: '돌쇠', agent: '돌쇠봇' });
+check('실명이 없으면 받지 않는다', r.status === 400 && /실명/.test(r.data.error), JSON.stringify(r.data));
+r = await ap({ real_name: '김철수', name: '돌쇠', agent: '돌쇠봇', id: 'dolsoe', email: 'kim@example.com', message: '잘 부탁합니다', claim_hash: 'x', status: 'approved' });
+const appRec = puts[0]?.body;
+check('신청은 열쇠 없이 받고, applications/pending/ 에 올라간다 (찾아갈 번호는 지문만)', r.status === 202 && /^ap-\d{17}-[0-9a-f]{8}$/.test(r.data.application)
+      && /^pxc_/.test(r.data.claim) && puts[0].path === `applications/pending/${r.data.application}.json` && appRec.real_name === '김철수'
+      && appRec.status === 'pending' && /^[0-9a-f]{64}$/.test(appRec.claim_hash) && !JSON.stringify(appRec).includes(r.data.claim), JSON.stringify(puts));
+const appId = r.data.application, claim = r.data.claim;
+files[`applications/pending/${appId}.json`] = appRec;
+const cl = async (key) => (await call(`/api/v1/apply/${appId}`, key)).data;
+check('수락 전에는 pending', (await cl(claim)).status === 'pending');
+check('찾아갈 번호가 틀리면 401', (await call(`/api/v1/apply/${appId}`, 'pxc_' + 'A'.repeat(40))).status === 401 && (await call(`/api/v1/apply/${appId}`)).status === 401);
+delete files[`applications/pending/${appId}.json`];
+files[`applications/done/${appId}.json`] = { ...appRec, status: 'approved', account: 'dolsoe' };
+puts = [];
+const got = (await call(`/api/v1/apply/${appId}`, claim)).data;
+const setk = puts.find((x) => x.path.startsWith('admin/'));
+const mark = puts.find((x) => x.path === `applications/done/${appId}.json`);
+check('수락되면 처음 한 번 열쇠를 내주고, 거래소에는 지문만 (set_key)', got.status === 'approved' && /^pxk_/.test(got.key) && got.account === 'dolsoe'
+      && setk && setk.body.action === 'set_key' && setk.body.id === 'dolsoe' && /^[0-9a-f]{64}$/.test(setk.body.hash) && mark && mark.body.claimed_at, JSON.stringify({ got, puts }));
+files[`applications/done/${appId}.json`] = mark.body;
+const again = await cl(claim);
+check('두 번째는 열쇠를 다시 주지 않는다', again.status === 'approved' && again.claimed && !again.key);
+files[`applications/done/${appId}.json`] = { ...appRec, status: 'rejected', why: '자리가 없다' };
+check('거절이면 rejected + 사유', (await cl(claim)).status === 'rejected' && (await cl(claim)).why === '자리가 없다');
+for (let i = 0; i < 21; i++) files[`applications/pending/ap-2026111500000000${String(i).padStart(1, '0')}-0000000${i % 10}.json`] = {};
+r = await ap({ real_name: '이영희', name: '영희' }, { 'CF-Connecting-IP': '9.9.9.9' });
+check('기다리는 신청이 20건이면 더 받지 않는다', r.status === 503, JSON.stringify(r.data));
+let lastAp;
+for (let i = 0; i < 6; i++) lastAp = await ap({ real_name: '박', name: 'x' }, { 'CF-Connecting-IP': '5.5.5.5' });
+check('한 곳에서 한 시간에 5번을 넘으면 429', lastAp.status === 429);
+
+check('참가 원서 화면은 로그인 없이 열리고, 다른 화면은 여전히 막힌다', (await call('/apply.html')).status === 200 && (await call('/apply')).status === 200
+      && (await call('/index.html')).status === 401 && (await call('/admin.html')).status === 401);
 
 console.log('요청 횟수 막이');
 let last;

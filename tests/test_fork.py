@@ -206,6 +206,38 @@ put("admin", "k4", {"action": "revoke_key", "id": "p2"})
 run("2026-11-19T16:32:00", "admin-inbox")
 check("열쇠 끊기", "api_keys" not in next(p for p in roster() if p.get("id") == "p2"))
 
+print("참가 신청 수락·거절 (주인)")
+pend = tmp / "applications" / "pending"
+pend.mkdir(parents=True, exist_ok=True)
+A1, A2, A3 = "ap-20261119170000000-aaaaaaaa", "ap-20261119170000000-bbbbbbbb", "ap-20261119170000000-cccccccc"
+(pend / f"{A1}.json").write_text(json.dumps({"id": A1, "real_name": "김철수", "name": "돌쇠", "agent": "돌쇠봇", "want_id": "dolsoe",
+                                             "claim_hash": "c" * 64, "status": "pending"}, ensure_ascii=False), encoding="utf-8")
+(pend / f"{A2}.json").write_text(json.dumps({"id": A2, "real_name": "이영희", "name": "영희", "want_id": "p1", "claim_hash": "d" * 64,
+                                             "status": "pending"}, ensure_ascii=False), encoding="utf-8")
+(pend / f"{A3}.json").write_text(json.dumps({"id": A3, "real_name": "박민수", "name": "민수", "claim_hash": "e" * 64, "status": "pending"},
+                                            ensure_ascii=False), encoding="utf-8")
+run("2026-11-19T17:10:00", "build")
+L = league()
+check("기다리는 신청이 관리자 자료에 실명과 함께 (찾아갈 번호 지문은 빼고)", {a["real_name"] for a in L["applications"]} == {"김철수", "이영희", "박민수"}
+      and all("claim_hash" not in a for a in L["applications"]), L["applications"])
+put("admin", "q1", {"action": "approve_application", "id": A1})
+put("admin", "q2", {"action": "approve_application", "id": A2})
+put("admin", "q3", {"action": "reject_application", "id": A3, "why": "다음 기회에"})
+put("admin", "q4", {"action": "approve_application", "id": A1})
+run("2026-11-19T17:11:00", "admin-inbox")
+log = json.loads((tmp / "docs" / "data" / "admin_log.json").read_text(encoding="utf-8"))
+r1 = next(p for p in roster() if p.get("application") == A1)
+r2 = next(p for p in roster() if p.get("application") == A2)
+done = {a: json.loads((tmp / "applications" / "done" / f"{a}.json").read_text(encoding="utf-8")) for a in (A1, A2, A3)}
+check("수락: 바라는 이름표로 계좌가 열리고 실명이 명단에", r1["id"] == "dolsoe" and r1["real_name"] == "김철수" and r1["agent"] == "돌쇠봇"
+      and (tmp / "accounts" / "dolsoe" / "ledger.jsonl").exists() and done[A1]["status"] == "approved" and done[A1]["account"] == "dolsoe", r1)
+check("바라는 이름표가 이미 있으면 f번호로", r2["id"] == "f1" and done[A2]["account"] == "f1", r2)
+check("거절: rejected + 사유, 계좌 없음", done[A3]["status"] == "rejected" and done[A3]["why"] == "다음 기회에" and not any(p.get("application") == A3 for p in roster()))
+check("같은 신청을 두 번 정하지 않는다, 처리한 신청은 기다리는 칸에서 빠진다", log[-1]["ok"] is False and not list(pend.glob("*.json")), log[-1])
+run("2026-11-19T17:12:00", "build")
+blob = (tmp / "docs" / "data" / "accounts" / "dolsoe.json").read_text(encoding="utf-8") + (tmp / "docs" / "data" / "state.json").read_text(encoding="utf-8")
+check("실명은 계좌 화면 자료에 실리지 않는다 (관리자 자료에만)", "김철수" not in blob and next(r for r in league()["players"] if r["id"] == "dolsoe")["real_name"] == "김철수")
+
 print("검사만 (dry_run 요청 — 에이전트 API)")
 n = len(ledger("p2"))
 put("inbox/p2", "d1", {"client_id": "d1", "symbol": "005930", "side": "buy", "qty": 1, "dry_run": True})
