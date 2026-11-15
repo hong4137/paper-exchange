@@ -54,6 +54,7 @@ broker/broker.py      장부·주문 접수·환전·비용·배당·분할·평
 broker/matching.py    체결 엔진 — 1분 시세로 주문이 언제·얼마에·몇 주 체결되는지 계산 (규칙은 파일 머리 설명)
 broker/prices.py      시세 수집 — 하루: 미국·환율 야후, 한국 다음 금융(정규장 종가) / 1분(장전·장후 포함): 미국·환율 야후, 한국 네이버
                       배당·액면분할: 야후 events (한국은 `{코드}.KS` → `.KQ`, 종류와 최근 종가가 우리 시세와 맞는 쪽만). 한국 종목이 ETF 인지: 같은 응답의 종목 종류 → 없으면 이름으로 어림
+broker/markets.py     장이 열리는 때 — 한국·미국 휴장일 표(2026~2028, holidays 0.108 의 KRX·NYSE 달력)·서머타임·조기 폐장, 시장 상태·다음 개장/폐장, 주문의 가장 빠른 체결 시각, 다음 정기 실행
 broker/live.py        한국 장전(08:00~08:50)을 그 시간에 직접 모으는 수집기 — 평일 아침에 돌려야 한다 (아직 실전 확인 전)
 ── 아래 자료는 자료 저장소(paper-exchange-data)에 있다 ──
 players.json          참가자 명단(`players`, 이메일 포함)과 대회(`league`) — config.json 위에 덮인다. 관리 창구만 고친다
@@ -80,6 +81,7 @@ docs/data/demo.json   화면 확인용 자료 (index.html?demo). tests/make_demo
 tests/test_broker.py  장부·종가 주문·산 주문별 손익 시험 — 임시 폴더·가짜 가격으로만 돈다
 tests/test_intraday.py 1분 체결 시험 (시장가·지정가·손절·거래량 한도·이어 체결·호가 단위·환율·시간외)
 tests/test_money.py   돈의 흐름 시험 (원화·달러 예수금, 환전, 시장별 비용, 배당, 분할·병합, 옛 장부 읽기)
+tests/test_operator.py 운용자(크론)용 시험 — 장이 열리는 때, 종목 확인, check·quote, 값 조건 지켜보기, state.json 에 더한 것
 tests/test_league.py  여러 참가자 시험 (계좌 분리, 주문 이슈와 본인 확인, 순위표, 기간 수익률·최대 낙폭·대회)
 tests/make_demo_real.py 실제 1분 시세에 가짜 주문을 넣어 demo.json 을 만든다 (네트워크 필요, 날짜는 최근 거래일로)
 tests/probe_sources.py 시세·배당·분할 원천이 열리는지 확인 (아무것도 저장하지 않는다)
@@ -241,6 +243,15 @@ retired/              (엔진) 쓰지 않게 된 이슈 창구·이슈 양식·�
 - **뜻이 넓어진 것**: `summary.cash` 와 `cash_pct` 는 이제 원화 + 달러(원화 환산)다. 체결 결과의 `cash_after` 는 원화 예수금, `cash_delta` 는 원화로 환산한 값이다(미국 주식은 실제로는 달러 `delta` 가 움직인다).
   `order_pnl` 의 실현·미실현 손익에는 환전 비용이 들어 있지 않다(환전 비용은 `summary.costs.fx_krw` 에 따로).
 - 여러 참가자가 되어도 주인 계좌의 자리는 그대로다: `ledger/ledger.jsonl`, `docs/data/state.json`, `inbox/`. `state.json` 에 `player`(누구 계좌인지)와 `performance`(기간별 수익률·최대 낙폭)가 더해졌다.
+- **운용자 건의로 더한 것**(2026-11-15 — 운용자가 크론으로 주 1회 혼자 돈다. 이름을 바꾸지 않는다):
+  - 접수 때 종목 확인: 시세를 받을 수 없는 번호·기호는 `refuse`(사유 "… 시세를 받을 수 없습니다"). 접수된 `order` 줄과 `orders[]` 에 `name`.
+  - `markets`: `{"KR"|"US"|"FX": {state: pre|r|post|closed, label, session_ends, next_open, next_close, trading_day, calendar_ok}}` — 시각은 한국 시각 ISO(분까지).
+  - `orders[]` 의 살아 있는 주문에 `earliest_fill`(가장 빨리 체결될 수 있는 때, 지정가·손절은 "이때부터 될 수 있다"). `next_run.exchange`(다음 정기 실행 예정), `calendar`(달력 출처·끝나는 해).
+  - `quotes`: 보유·대기·지켜보는 종목마다 `{symbol, name, market, currency, close, close_date, last: {price, at, session, session_label}, tick, limit_up, limit_down(한국), fx(미국)}`.
+  - `watches[]`: `{id(W0001), ref, symbol, name, market, when, value, valid_until, client_id, requested_at, ts, status: watching|hit|expired|removed, hit: {at, price, date}, text, removed}` / `watch_hits[]` = 그중 hit.
+  - 창구 요청 `action` 에 `watch`(`symbol`, `when`: close_below·close_above·price_below·price_above, `value`, `ref`, `valid_days` 기본 90) · `unwatch`(`watch`, `why`). 장부 줄 `watch`·`unwatch`. 주문을 내지 않는다. price_* 는 정규장 1분 값.
+  - 명령(읽기 전용, 잠긴 자료 폴더에서도 된다): `check --json '{창구 요청}'`(또는 order 와 같은 칸) → JSON 한 줄 `{ok, action, would, earliest_fill}` / `{ok: false, why}`, 끝 값 0·3.
+    `quote --symbol S [--krw N|--usd N]` → JSON 한 줄 `{ok, …quotes 와 같은 칸, shares_for: {qty, price, …}}`, 끝 값 0·3. 캐시에 없으면 원천에서 받아 보되 저장하지 않는다.
 - 이 항목들의 이름을 바꾸거나 빼려면 `../모의투자-일지/journal.py` 와 그 시험을 같이 고친다.
 
 ## 알려진 한계
@@ -257,6 +268,8 @@ retired/              (엔진) 쓰지 않게 된 이슈 창구·이슈 양식·�
 - 해외 주식 양도소득세, 금융소득 종합과세는 떼지 않는다(양도세는 예상 금액만 보여 준다).
 - 접수 때 주문 가능 금액은 다른 대기 주문이 쓸 돈을 빼지 않고 본다. 모자라면 체결 때 거부된다.
 - 매수·매도 호가와 건별 체결 내역은 없다. 호가 차이와 체결 가능 수량은 1분 시세로 어림한 것이다.
+- 휴장일 표는 2028년까지다(`calendar_ok` 가 false 가 되기 전에 늘린다). 임시공휴일·수능일·새해 첫날 늦은 개장(10:00)은 모른다.
+- 접수 때 종목 확인은 시세 원천에 묻는다 — 원천이 잠시 막히면 맞는 번호도 받지 않는다(사유에 그렇게 적힌다).
 - 한국 장전 시세는 `live.py` 를 돌린 날만 있다. KRX 시간외 단일가(16:00~18:00, 10분 단위)는 따로 다루지 않는다 — 한국 장후는 넥스트레이드 값이다.
 - 미국 시간외 체결량은 가정이다(거래량 자료 없음).
 - 한국 포털 "현재가"는 애프터마켓 가격이라 평가에 쓰지 않는다. 야후 `.KS` 는 시세로는 쓰지 않는다(배당·분할 자료로만).
