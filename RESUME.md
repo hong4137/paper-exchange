@@ -12,6 +12,7 @@
   `npx wrangler secret put GITHUB_TOKEN` (저장소 paper-exchange 의 Contents·Issues 읽기/쓰기 토큰, `운영-안내.md` 1번),
   `npx wrangler secret put ADMIN_EMAILS` (관리자의 sharktalk 로그인 이메일, 여럿이면 쉼표).
 - 2026-11-15 다시 올림 (주문 페이지 `trade.html`, 시세 `/api/market`·`/api/search`·`/api/quote` 포함). 로그인 없이 이 주소들도 401 로 막히는 것을 직접 요청해 확인했다. 비밀 설정 두 가지는 들어가 있다.
+- **자동으로 올리기**(2026-11-15 추가): 화면·문지기가 `main` 에 바뀌어 들어오면 GitHub 자동 실행 `site-deploy` 가 올리고 401 확인까지 한다. 저장소 비밀 `CLOUDFLARE_API_TOKEN` 을 넣어야 켜진다(`운영-안내.md` "자동으로 올리기"). 넣기 전까지는 위 명령으로 PC 에서 올린다.
 - 저장소는 아직 공개, GitHub Pages 주소도 아직 열려 있다. 비공개 전환은 확인이 끝난 뒤 사용자가 한다.
 - 포털 메뉴에는 올리지 않았다 (따로 정한다).
 

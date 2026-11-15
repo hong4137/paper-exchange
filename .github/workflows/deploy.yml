@@ -1,0 +1,76 @@
+name: site-deploy
+# 화면(docs/*.html)이나 문지기(site/)·설정(wrangler.jsonc)이 main 에 바뀌어 들어오면 sharktalk(exchange.sharktalk.co.kr)에 다시 올린다.
+# PC 에서 npx wrangler deploy 하던 것과 같은 일이다. 장부·시세 자료(docs/data)가 바뀔 때는 돌지 않는다 — 자료는 문지기가 저장소에서 바로 읽는다.
+# 필요한 것: 저장소 Settings → Secrets and variables → Actions 에 CLOUDFLARE_API_TOKEN (sharktalk 가 있는 개인 Cloudflare 계정, "Edit Cloudflare Workers").
+#   없으면 시험만 돌고 올리지 않는다(실패로 치지 않는다). 순서는 운영-안내.md "자동으로 올리기".
+# 올린 뒤 로그인하지 않은 요청이 전부 막히는지(401) 확인한다. 하나라도 열려 있으면 실패로 끝나 주인에게 알림이 간다.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/*.html'
+      - 'docs/.assetsignore'
+      - 'site/**'
+      - 'wrangler.jsonc'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: site-deploy
+  cancel-in-progress: false
+
+env:
+  CLOUDFLARE_ACCOUNT_ID: 8a7b1e2e89027f9c078fac80ab49d22e      # 개인 계정 번호 (비밀 아님 — RESUME.md 와 같다)
+  SITE: https://exchange.sharktalk.co.kr
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: 문지기·시세 시험
+        run: |
+          node tests/test_site.mjs
+          node tests/test_market.mjs
+      - name: 열쇠가 있는지
+        id: key
+        env:
+          TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::notice::CLOUDFLARE_API_TOKEN 이 없어 sharktalk 에 올리지 않았습니다 (운영-안내.md '자동으로 올리기')."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: sharktalk 에 올리기
+        if: steps.key.outputs.ok == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx --yes wrangler deploy
+      - name: 로그인 없이 막히는지
+        if: steps.key.outputs.ok == 'true'
+        run: |
+          sleep 10
+          bad=0
+          for path in / /index.html /trade.html /admin.html /data/league.json /data/state.json /api/me /api/market "/api/quote?symbol=005930"; do
+            code=""
+            for i in 1 2 3; do
+              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$SITE$path") && [ -n "$code" ] && [ "$code" != "000" ] && break
+              sleep 5
+            done
+            echo "$path → $code"
+            if [ "$code" != "401" ]; then bad=1; fi
+          done
+          if [ "$bad" = "1" ]; then
+            echo "::error::로그인 없이 막히지 않는 주소가 있습니다. sharktalk 쪽을 바로 확인하세요 (되돌리기: PC 에서 npx wrangler rollback)."
+            exit 1
+          fi
+          echo "전부 막힘 (401)"
