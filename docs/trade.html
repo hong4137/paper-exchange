@@ -393,7 +393,7 @@ function renderQuote(){
       <span class="badge ${live?'live':''}">${SESSION[q.ext&&q.ext.open?q.ext.session:q.session]||'—'}</span></div>
     <div class="qpx"><span class="p num ${cls(q.chg)}">${us?usd(q.price):won(q.price)}<small style="font-size:.45em;color:var(--dim);margin-left:4px">${us?'달러':'원'}</small></span>
       <span class="d num ${cls(q.chg)}">${q.chg>0?'+':''}${us?usd(q.chg):won(q.chg)} (${pct(q.chg_pct)})</span></div>
-    ${q.ext?`<div class="qext num">${SESSION[q.ext.session]||'시간외'} ${us?usd(q.ext.price)+'달러':won(q.ext.price)+'원'} <span class="${cls(q.ext.chg)}">(${pct(q.ext.chg_pct)})</span>${q.ext.open?' · 지금 거래 중':''}</div>`:''}
+    ${q.ext?`<div class="qext num">${SESSION[q.ext.session]||'시간외'} ${us?usd(q.ext.price)+'달러':won(q.ext.price)+'원'} <span class="${cls(q.ext.chg)}">(정규장 종가 대비 ${pct(q.ext.chg_pct)})</span>${q.ext.open?' · 지금 거래 중':''}</div>`:''}
     ${chartSvg(q)}
     <dl class="stats">${rows.map(([k,v])=>`<div><dt>${k}</dt><dd class="num">${v}</dd></div>`).join('')}</dl>
     <div class="mine">${mineTxt}</div>
