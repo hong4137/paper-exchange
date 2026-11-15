@@ -28,5 +28,8 @@ jobs:
           python tests/test_money.py
           python tests/test_league.py
           node tests/test_site.mjs
+          node tests/test_market.mjs
       - name: 시세 원천 열리는지
         run: python tests/probe_sources.py
+      - name: 주문 페이지 시세 원천
+        run: node tests/probe_market.mjs
