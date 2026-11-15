@@ -12,6 +12,7 @@
 //   3. 자료 내주기: /data/... 는 저장소에서 읽어 오되, 자기 계좌 것만. 전체 수익률과 관리자 화면은 관리자만.
 //   4. 주문 받기: /api/order → 저장소의 inbox/{계좌}/ 에 요청 파일을 올린다 (거래소의 주문 창구가 접수한다).
 //   5. 관리: /api/admin → 저장소에 "[관리]" 이슈를 연다 (거래소가 주인 계정의 이슈로 처리한다).
+//   6. 시장 정보(주문 페이지): /api/market 시장 현황, /api/search?q= 종목 검색, /api/quote?symbol= 종목 현황 — market.mjs. 로그인한 참가자 누구나.
 //
 // 설정 (wrangler.jsonc 의 vars·services 와 wrangler secret)
 //   AUTH_SVC      sharktalk-auth 워커 (service binding)     AUTH_ME_URL  /me 주소      LOGIN_URL  로그인하러 갈 주소
@@ -19,6 +20,8 @@
 //   ADMIN_EMAILS  관리자의 이메일이나 아이디 (비밀)          GITHUB_BRANCH 기본 main
 //
 // 이 파일은 거래소의 돈 계산을 하지 않는다. 주문이 맞는지는 거래소(broker.py)가 판단한다.
+
+import * as market from './market.mjs';
 
 const te = new TextEncoder();
 const b64uToBytes = (s) => {
@@ -256,6 +259,17 @@ export async function handle(request, env, next, fetchFn = fetch) {
     if (r.status === 404) return json({ error: '아직 자료가 없습니다' }, 404);
     if (!r.ok) return json({ error: '거래소 자료를 읽지 못했습니다' }, 502);
     return new Response(r.body, { status: 200, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' } });
+  }
+
+  if (path === '/api/market' || path === '/api/search' || path === '/api/quote') {
+    if (request.method !== 'GET') return json({ error: '보내는 방식이 올바르지 않습니다' }, 405);
+    try {
+      if (path === '/api/market') return json(await market.overview(fetchFn));
+      if (path === '/api/search') return json(await market.search(url.searchParams.get('q'), fetchFn));
+      return json(await market.quote(url.searchParams.get('symbol'), fetchFn));
+    } catch (e) {
+      return json({ error: /올바르지|아닙니다/.test(String(e.message)) ? e.message : '시세를 받지 못했습니다. 잠시 뒤 다시 해 주세요.' }, 502);
+    }
   }
 
   if (path.startsWith('/api/')) return json({ error: '없는 주소입니다' }, 404);
