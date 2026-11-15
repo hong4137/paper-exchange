@@ -81,7 +81,7 @@ check("일요일 한국: 닫힘, 다음 개장 월 09:00", st["state"] == "close
 check("한국 장전·정규장·장후", [mk.status("KR", K(x))["state"] for x in ("2026-11-16T08:10", "2026-11-16T10:00", "2026-11-16T16:00", "2026-11-16T20:30")]
       == ["pre", "r", "post", "closed"])
 check("한국 휴장일(추석·연말)을 건너뛴다", mk.status("KR", K("2026-09-23T16:00"))["next_open"] == "2026-09-28T09:00+09:00"
-      and mk.status("KR", K("2026-12-30T16:00"))["next_open"] == "2027-01-04T09:00+09:00")
+      and mk.status("KR", K("2026-12-30T16:00"))["next_open"] == "2027-01-04T10:00+09:00")   # 새해 첫 거래일은 10:00
 check("미국 겨울: 한국 23:30 개장·06:00 폐장", mk.status("US", K("2026-11-16T12:00"))["next_open"] == "2026-11-16T23:30+09:00"
       and mk.status("US", K("2026-11-16T23:40"))["next_close"] == "2026-11-17T06:00+09:00")
 check("미국 서머타임: 한국 22:30 개장 (3월 둘째 일요일부터)", mk.status("US", K("2026-03-09T12:00"))["next_open"] == "2026-03-09T22:30+09:00"
@@ -98,6 +98,31 @@ check("가장 빠른 체결: 시장가는 다음 정규장의 첫 1분, 장중�
       and ef({"market": "KR", "type": "market"}, "2026-11-16T10:00:30+09:00") == "2026-11-16T10:01+09:00")
 check("시간외 포함 지정가는 장전부터, 종가 주문은 폐장 때", ef({"market": "KR", "type": "limit", "session": "all"}, "2026-11-15T17:19") == "2026-11-16T08:00+09:00"
       and ef({"market": "US", "type": "moc"}, "2026-11-15T17:19") == "2026-11-17T06:00+09:00")
+
+print("한국의 시간이 바뀌는 날 (수능일 2026-11-19: 정규장 10:00~16:30, 장전 없음, 장후 17:00~20:00)")
+import prices as px  # noqa: E402
+st = mk.status("KR", K("2026-11-18T16:00"))
+check("수능일 전날: 다음 개장 10:00, 폐장 16:30", st["next_open"] == "2026-11-19T10:00+09:00" and st["next_close"] == "2026-11-19T16:30+09:00", st)
+check("수능일 08:10 은 장전이 아니다(닫힘), 16:00 은 정규장, 16:45 는 닫힘, 17:30 은 장후",
+      [mk.status("KR", K(x))["state"] for x in ("2026-11-19T08:10", "2026-11-19T16:00", "2026-11-19T16:45", "2026-11-19T17:30")] == ["closed", "r", "closed", "post"])
+check("1분 봉의 시간대: 15:45·16:30(마감 단일가)은 정규장, 09:30 은 정규장 아님, 17:05 는 장후",
+      [mk.kr_session_of(ts(x)) for x in ("2026-11-19T15:45", "2026-11-19T16:30", "2026-11-19T09:30", "2026-11-19T17:05")] == ["r", "r", "pre", "post"]
+      and [mk.kr_session_of(ts(x)) for x in ("2026-11-20T15:30", "2026-11-20T15:35", "2026-11-20T08:30")] == ["r", "post", "pre"])
+fake = [{"localDateTime": f"20261119{hm}00", "openPrice": 100, "highPrice": 101, "lowPrice": 99, "currentPrice": 100,
+         "accumulatedTradingVolume": 10} for hm in ("0930", "1000", "1545", "1630", "1705")]
+_get = px._get
+px._get = lambda url, headers=None: fake
+days, _ = px._naver_minutes("005930", K("2026-11-19T21:00"))
+px._get = _get
+check("네이버 1분 시세를 받을 때도 같은 시간표로 붙인다", [b[6] for b in days["2026-11-19"]] == ["pre", "r", "r", "r", "post"], days)
+check("하루 시세가 끝났는지: 수능일 16:07 은 아직(장중), 17:00 부터 끝 / 평일 16:00 부터 끝",
+      not px._complete("2026-11-19", "KR", K("2026-11-19T16:07")) and px._complete("2026-11-19", "KR", K("2026-11-19T17:00"))
+      and px._complete("2026-11-20", "KR", K("2026-11-20T16:00")) and not px._complete("2026-11-20", "KR", K("2026-11-20T15:59")))
+check("가장 빠른 체결: 수능일 시장가는 10:00 부터, 15:40 에 내면 15:41", ef({"market": "KR", "type": "market"}, "2026-11-18T20:00") == "2026-11-19T10:00+09:00"
+      and ef({"market": "KR", "type": "market"}, "2026-11-19T15:40") == "2026-11-19T15:41+09:00"
+      and ef({"market": "KR", "type": "limit", "session": "all"}, "2026-11-18T20:00") == "2026-11-19T10:00+09:00")
+check("늦은 개장일 표: 2026 새해·수능은 확인, 2027·2028 은 예상", mk.KR_SPECIAL["2026-11-19"]["status"] == "확인"
+      and all(mk.KR_SPECIAL[d]["status"] == "예상" for d in ("2027-01-04", "2027-11-18", "2028-01-03", "2028-11-16")))
 
 print("종목 확인과 이름")
 daily("005930", "KR", "KRW", [("2026-11-12", 100000), ("2026-11-13", 100000)], name="삼성전자")
@@ -189,6 +214,21 @@ run("2027-03-01T10:00:00+09:00", "build")
 check("기한이 지나면 expired", next(w for w in state()["watches"] if w["id"] == "W0002")["status"] == "hit"
       and all(w["status"] in ("hit", "removed", "expired") for w in state()["watches"]))
 check("장부 지문 이상 없음", run("2027-03-01T10:00:00+09:00", "verify").returncode == 0)
+
+print("수능일 장중 체결 (가짜 1분 시세, 시간대는 거래소 시간표로 붙인 것)")
+daily("000005", "KR", "KRW", [("2026-11-18", 10000)], name="시험 종목")
+rows = [("2026-11-19T15:41", 10000, 10000, 10000, 10000, 100000), ("2026-11-19T16:30", 10100, 10100, 10100, 10100, 100000)]
+minutes("000005", "2026-11-19", [(*r, mk.kr_session_of(ts(r[0]))) for r in rows])
+ingest("2026-11-19T15:40:00+09:00", [{"client_id": "k1", "symbol": "000005", "side": "buy", "qty": 10}])
+s = state()
+o = next(o for o in s["orders"] if o.get("client_id") == "k1")
+check("수능일 15:40 의 시장 상태는 정규장, 다음 폐장 16:30", s["markets"]["KR"]["state"] == "r" and s["markets"]["KR"]["next_close"] == "2026-11-19T16:30+09:00"
+      and s["markets"]["KR"]["special"]["why"] == "수능일", s["markets"]["KR"])
+check("주문의 가장 빠른 체결 15:41", o["earliest_fill"] == "2026-11-19T15:41+09:00", o)
+run("2026-11-19T16:07:00+09:00", "settle")
+run("2026-11-19T16:07:00+09:00", "build")
+o = next(o for o in state()["orders"] if o.get("client_id") == "k1")
+check("15:40 에 낸 시장가가 16:30 전(15:41 정규장 봉)에 체결된다", o["status"] == "filled" and o["fills"][0].get("at", "").startswith("2026-11-19T15:41"), o)
 
 shutil.rmtree(tmp, ignore_errors=True)
 print(f"\n{'전부 통과' if not fails else '실패 ' + str(len(fails)) + '건'}")

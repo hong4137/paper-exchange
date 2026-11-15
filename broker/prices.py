@@ -12,6 +12,10 @@ import re
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import markets as mk  # noqa: E402  한국 시간표(수능일·새해 첫날)
 
 KST = timezone(timedelta(hours=9))
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
@@ -31,8 +35,9 @@ def _get(url, headers=None):
 def _complete(bar_date: str, market: str, now: datetime) -> bool:
     """그 날짜의 봉이 끝났는가 (now 는 KST)."""
     d = datetime.strptime(bar_date, "%Y-%m-%d").replace(tzinfo=KST)
-    if market == "KR":
-        return now >= d + timedelta(hours=16)            # 15:30 마감 뒤
+    if market == "KR":                                   # 정규장 마감 30분 뒤 (평소 16:00, 수능일 17:00 — markets.py 의 시간표)
+        r = mk.regular("KR", d.date())
+        return now >= (r[1] + timedelta(minutes=30) if r else d + timedelta(hours=16))
     if market == "US":
         return now >= d + timedelta(days=1, hours=7)     # 다음 날 07:00 KST (서머타임 여부 무관)
     return now.date() > d.date()                          # 환율: 지난 날짜만
@@ -279,7 +284,7 @@ def _naver_minutes(code, now):
         ts = datetime.strptime(s[:12], "%Y%m%d%H%M").replace(tzinfo=KST).timestamp()
         if ts > limit:
             continue
-        ses = "pre" if hm < "0900" else ("r" if hm <= "1530" else "post")
+        ses = mk.kr_session_of(ts)                       # 그날 시간표로 (수능일·새해 첫날은 다르다)
         d = f"{s[:4]}-{s[4:6]}-{s[6:8]}"
         out.setdefault(d, []).append([int(ts), x["openPrice"], x["highPrice"], x["lowPrice"], x["currentPrice"],
                                       x["accumulatedTradingVolume"] or 0, ses])

@@ -15,6 +15,11 @@
 """
 import math
 from datetime import datetime, timedelta, timezone
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import markets as mk  # noqa: E402  한국 시간표(수능일·새해 첫날)
 
 KST = timezone(timedelta(hours=9))
 PRECISION = {60: "1분", 300: "5분"}
@@ -106,7 +111,11 @@ def first_eligible(placed_ts, market):
     """(하루 시세로 어림할 때) 주문 뒤 처음 열리는 거래일의 가장 이른 날짜."""
     t = datetime.fromisoformat(placed_ts).astimezone(KST)
     d = t.date()
-    same_day = t.hour < 9 if market == "KR" else t.hour < 22      # 미국장은 한국 밤에 열린다
+    if market == "KR":
+        r = mk.regular("KR", d)                               # 그날 정규장 시작 전이면 그날부터 (수능일·새해 첫날은 10:00)
+        same_day = t < r[0] if r else t.hour < 9
+    else:
+        same_day = t.hour < 22                                # 미국장은 한국 밤에 열린다
     return (d if same_day else d + timedelta(days=1)).isoformat()
 
 
@@ -114,6 +123,9 @@ def _session_ts(d, market, close=False):
     """하루 시세로 체결할 때 순서를 매기기 위한 대략의 시각."""
     base = datetime.strptime(d, "%Y-%m-%d").replace(tzinfo=KST)
     if market == "KR":
+        r = mk.regular("KR", base.date())
+        if r:
+            return (r[1] if close else r[0]).timestamp()
         return (base + timedelta(hours=15, minutes=30 if close else 0) if close else base + timedelta(hours=9)).timestamp()
     return (base + timedelta(days=1, hours=6) if close else base + timedelta(hours=23, minutes=30)).timestamp()
 
