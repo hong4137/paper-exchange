@@ -179,6 +179,9 @@ footer{margin:40px 0 50px; padding-top:16px; border-top:1px solid var(--line); c
 .form button:disabled{opacity:.5; cursor:default}
 .form .msg{margin:10px 0 0; font-size:13.5px; color:var(--dim); min-height:1.3em} .form .msg.ok{color:var(--ok)} .form .msg.bad{color:var(--up)}
 .slip .cancel{margin-top:10px; font:inherit; font-size:12.5px; background:transparent; border:1px solid #9aa3b8; color:#333d55; border-radius:99px; padding:4px 12px; cursor:pointer}
+.tabs{display:flex; gap:4px}
+.tabs a{font-size:13.5px; text-decoration:none; color:var(--dim); padding:5px 12px; border-radius:99px; border:1px solid transparent}
+.tabs a.on{color:var(--txt); border-color:var(--line); background:var(--ink2); font-weight:700}
 </style>
 </head>
 <body>
@@ -187,6 +190,7 @@ footer{margin:40px 0 50px; padding-top:16px; border-top:1px solid var(--line); c
     <h1>모의 거래소 — 관리자 화면</h1>
     <span class="tag warn">가상의 돈 · 실제 주문 아님</span>
     <span class="sp"></span>
+    <nav class="tabs"><a href="index.html">내 계좌</a><a href="trade.html">주문</a><a class="on" href="admin.html">관리자 화면</a></nav>
     <span class="tag" id="upd">불러오는 중</span>
   </header>
   <div id="manage"></div>

@@ -57,7 +57,10 @@ check('현재가·전일 종가·등락', q.name === '삼성전자' && q.price =
 check('정규장 시간이면 "정규장"', q.session === 'r');
 check('호가 단위를 그날 시세에서 읽는다 (500원)', q.tick === 500, String(q.tick));
 check('상·하한가 = 전일 종가 ±30%', q.limits.up === 273000 && q.limits.down === 147000, JSON.stringify(q.limits));
-check('그래프는 오늘 것만', q.bars.length === 40 && q.bars.every((b) => b[1] > 1000));
+check('그래프는 가장 최근 거래일 하루만', q.bars.length === 40 && q.bars.every((b) => b[1] > 1000));
+check('네이버 1분 시세: 날짜를 주지 않으면 가장 최근 날', M.readNaverMinutes([{ localDateTime: '20261112100000', currentPrice: 1 }, { localDateTime: '20261113100000', currentPrice: 2 }, { localDateTime: '20261113100100', currentPrice: 3 }]).map((b) => b[1]).join() === '2,3');
+check('네이버 등락은 부호 없이 와서 상승·하락 표시로 맞춘다', M.readNaverRealtime({ datas: [{ closePrice: '100', compareToPreviousClosePrice: '5', compareToPreviousPrice: { code: '5', name: 'FALLING' } }] }).prev === 105
+      && M.readNaverRealtime({ datas: [{ closePrice: '100', compareToPreviousClosePrice: '5', compareToPreviousPrice: { code: '2', name: 'RISING' } }] }).prev === 95);
 M._resetMarket();
 routes['polling.finance.naver.com/api/realtime/domestic/stock/005930'] = { datas: [{ stockName: '삼성전자', closePrice: '209,000', compareToPreviousClosePrice: '-1,000',
   marketStatus: 'CLOSE', overMarketPriceInfo: { tradingSessionType: 'AFTER_MARKET', overMarketStatus: 'OPEN', overPrice: '207,500', fluctuationsRatio: '-1.19' } }] };
@@ -97,6 +100,7 @@ check('영문 이름으로 미국 종목을 찾고, 미국 밖 거래소·지수
 check('같은 종목은 한 번만 (네이버·야후 양쪽에서 나온 005930)', s.items.filter((x) => x.symbol === '005930').length <= 1);
 s = await M.search('069500', fetchFn);
 check('여섯 자리 번호는 그대로 한국 종목으로', s.items[0].symbol === '069500' && s.items[0].market === 'KR');
+check('긴 영어 단어는 미국 종목 기호로 덧붙이지 않는다', !(await M.search('micron', fetchFn)).items.some((x) => x.symbol === 'MICRON'));
 check('빈 검색은 빈 목록', (await M.search('  ', fetchFn)).items.length === 0);
 
 console.log('문지기 뒤에서');

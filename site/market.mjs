@@ -4,8 +4,9 @@
 //   지수·환율·금리·원자재, 미국 종목: 야후 chart API (거래소의 prices.py 와 같은 원천)
 //   한국 종목: 네이버 실시간(polling.finance.naver.com — broker/live.py 와 같은 원천) + 네이버 1분 시세(api.stock.naver.com — prices.py 와 같은 원천)
 //   검색: 네이버 자동완성(한국 종목·한글 이름) + 야후 검색(미국 종목)
-// ★ 응답 모양은 이 파일을 쓴 대화에서 원천에 접속하지 못해 확인하지 못했다. 원천마다 꺼내는 함수를 하나씩 두고 넓게 받게 했다.
-//   GitHub 확인 실행(tests/probe_market.mjs)이 실제 응답을 찍는다 — 다르면 그 함수만 고친다.
+// 응답 모양은 2026-11-15 GitHub 확인 실행(tests/probe_market.mjs)으로 실제 원천에서 확인했다 — 네이버 자동완성 {query, items:[{code, name, typeName, reutersCode, nationCode, category}]},
+//   네이버 실시간 datas[0] {stockName, closePrice "209,000", compareToPreviousClosePrice(부호 없음 — compareToPreviousPrice.name 이 RISING/FALLING), openPrice…, marketStatus, overMarketPriceInfo}.
+//   원천이 바뀌면 그 원천을 읽는 함수 하나만 고친다.
 // 여기 값은 화면에 보여 주는 참고용이다. 체결은 거래소가 주문 뒤의 1분 시세로 따로 계산한다.
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36';
@@ -160,7 +161,7 @@ export async function search(qRaw, fetchFn = fetch) {
   const add = (x) => { const k = x.market + ':' + x.symbol; if (!seen.has(k)) { seen.add(k); items.push(x); } };
   if (KR_CODE.test(q)) add({ symbol: q, name: q, market: 'KR', exchange: '한국', direct: true });
   for (const l of lists) l.forEach(add);
-  if (US_SYM.test(q.toUpperCase()) && !items.some((x) => x.symbol === q.toUpperCase())) add({ symbol: q.toUpperCase(), name: q.toUpperCase(), market: 'US', exchange: '미국', direct: true });
+  if (q.length <= 5 && US_SYM.test(q.toUpperCase()) && !items.some((x) => x.symbol === q.toUpperCase())) add({ symbol: q.toUpperCase(), name: q.toUpperCase(), market: 'US', exchange: '미국', direct: true });
   return { items: items.slice(0, 15) };
 }
 
@@ -174,7 +175,10 @@ export function readNaverRealtime(j) {
   const d = j && Array.isArray(j.datas) ? j.datas[0] : null;
   if (!d) throw new Error('네이버 응답 모양이 다릅니다');
   const price = num(d.closePrice);
-  const diff = num(d.compareToPreviousClosePrice);
+  let diff = num(d.compareToPreviousClosePrice);
+  const dir = String((d.compareToPreviousPrice && (d.compareToPreviousPrice.name || d.compareToPreviousPrice.code)) || '');
+  if (diff !== null && /FALL|LOWER_LIMIT|^[45]$/.test(dir)) diff = -Math.abs(diff);          // 네이버는 등락 폭을 부호 없이 준다
+  else if (diff !== null && /RIS|UPPER_LIMIT|^[12]$/.test(dir)) diff = Math.abs(diff);
   const prev = price !== null && diff !== null ? price - diff : null;
   const over = d.overMarketPriceInfo || null;
   let ext = null;
@@ -187,11 +191,13 @@ export function readNaverRealtime(j) {
            volume: num(d.accumulatedTradingVolume), status: String(d.marketStatus || ''), ext };
 }
 
-/** 네이버 1분 시세 응답(prices.py 와 같은 원천) → [[t, close, volume]] (오늘 것만) */
+/** 네이버 1분 시세 응답(prices.py 와 같은 원천) → [[t, close, volume]]. day 가 없으면 들어 있는 가장 최근 거래일 하루. */
 export function readNaverMinutes(j, day) {
   const out = [];
   let lastVol = null;
-  for (const x of Array.isArray(j) ? j : []) {
+  const rows = Array.isArray(j) ? j : [];
+  if (!day) day = rows.reduce((m, x) => { const d = String(x.localDateTime || '').slice(0, 8); return d > m ? d : m; }, '');
+  for (const x of rows) {
     const s = String(x.localDateTime || '');
     if (s.slice(0, 8) !== day) continue;
     const t = Date.UTC(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8), +s.slice(8, 10), +s.slice(10, 12)) / 1000 - KST;
@@ -228,10 +234,9 @@ export async function quote(symRaw, fetchFn = fetch, nowSec = Math.floor(Date.no
   if (KR_CODE.test(sym)) {
     const rt = readNaverRealtime(await getJSON(`https://polling.finance.naver.com/api/realtime/domestic/stock/${sym}`, fetchFn));
     let bars = [];
-    try {
-      const day = kstDay(nowSec);
-      const j = await getJSON(`https://api.stock.naver.com/chart/domestic/item/${sym}/minute?startDateTime=${day}0800&endDateTime=${day}2000`, fetchFn);
-      bars = readNaverMinutes(j, day);
+    try {     // 오늘 — 쉬는 날이면 가장 최근 거래일 (최근 7일 안에서)
+      const j = await getJSON(`https://api.stock.naver.com/chart/domestic/item/${sym}/minute?startDateTime=${kstDay(nowSec - 7 * 86400)}0800&endDateTime=${kstDay(nowSec)}2000`, fetchFn);
+      bars = readNaverMinutes(j);
     } catch (e) { /* 그래프 없이도 현황은 낸다 */ }
     const hm = kstHM(nowSec);
     const session = rt.ext && rt.ext.open ? rt.ext.session : /OPEN/.test(rt.status) && hm >= 900 && hm <= 1530 ? 'r' : 'closed';
