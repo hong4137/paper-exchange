@@ -11,7 +11,9 @@
 
 휴장일 표 — 2026~2028년. 출처: 파이썬 holidays 0.108 의 KRX·NYSE 거래소 달력(2026-11-15 뽑음, 주말 제외).
   표에 없는 해는 주말만 쉰다고 보고 calendar_ok=False 로 알린다 — 2028년 말 전에 표를 늘려야 한다.
-  임시공휴일(정부가 뒤늦게 정하는 날), 수능일·새해 첫날의 늦은 개장(10:00)은 반영하지 않는다.
+  한국의 시간이 바뀌는 날(수능일·새해 첫 거래일)은 KR_SPECIAL 표를 쓴다 — 아래 설명.
+  임시공휴일·임시 휴장은 KR_HOLIDAYS / US_HOLIDAYS 에, 시간이 바뀌는 날은 KR_SPECIAL 에 손으로 한 줄 더한다(사람이 알려 주면).
+  한국 시간대를 정하는 곳은 이 파일 하나다 — prices.py(1분 봉의 시간대 표시·하루 시세가 끝났는지)·matching.py(하루 시세 어림)도 여기서 받는다.
 """
 from datetime import date, datetime, time, timedelta, timezone
 
@@ -36,6 +38,25 @@ US_HOLIDAYS = {
     "2028-01-17", "2028-02-21", "2028-04-14", "2028-05-29", "2028-06-19", "2028-07-04", "2028-09-04", "2028-11-23",
     "2028-12-25",
 }
+# 한국의 시간이 바뀌는 날 — 날짜: {why, pre, r, post (각각 ("HH:MM", "HH:MM") 또는 None = 열리지 않음), src, status}
+# 2026-11-15 조사. "확인" = 거래소·넥스트레이드 발표 보도 여럿이 일치, "예상" = 아직 공지 전이라 그해 관례대로 넣음(공지가 나오면 고친다).
+#   새해 첫 거래일: KRX 정규장 10:00 개장(개장식), 마감은 평소대로 15:30. 넥스트레이드 프리마켓 없음, 메인마켓 10:00:30 시작·평소 마감.
+#     출처(2026-01-02): kukinews.com/article/view/kuk202601020012 · s-d.kr/news/articleView.html?idxno=78564 · newscj.com/news/articleView.html?idxno=3358560
+#     애프터마켓(15:40~20:00)이 그날 그대로인지는 기사에 없다 — 확인 못 함, 평소대로 넣었다.
+#   수능일: KRX 정규장 10:00~16:30 (한 시간씩 늦춤). 넥스트레이드 프리마켓 없음, 애프터마켓 17:00~20:00 (시작만 한 시간 늦춤).
+#     출처(2026-11-19, 거래소 2026-11-05 발표): ebn.co.kr/news/articleView.html?idxno=1730562 · dt.co.kr/article/12093371 · news.mtn.co.kr/article/2026110510425587061
+#     넥스트레이드 메인마켓이 16:20 까지라는 보도가 한 곳(newswell.co.kr idxno=23446)에만 있다 — 거래소는 KRX 시간(16:30)을 쓴다.
+#   수능 날짜: 2027-11-18(2028학년도), 2028-11-16(2029학년도) — 교육부 발표(sanedu.com 입시리포트 등). 시장 시간은 그해 거래소 공지 전이라 "예상".
+KR_SPECIAL = {
+    "2026-01-02": {"why": "새해 첫 거래일", "pre": None, "r": ("10:00", "15:30"), "post": ("15:40", "20:00"), "status": "확인 (장후는 확인 못 함)"},
+    "2026-11-19": {"why": "수능일", "pre": None, "r": ("10:00", "16:30"), "post": ("17:00", "20:00"), "status": "확인"},
+    "2027-01-04": {"why": "새해 첫 거래일", "pre": None, "r": ("10:00", "15:30"), "post": ("15:40", "20:00"), "status": "예상"},
+    "2027-11-18": {"why": "수능일", "pre": None, "r": ("10:00", "16:30"), "post": ("17:00", "20:00"), "status": "예상"},
+    "2028-01-03": {"why": "새해 첫 거래일", "pre": None, "r": ("10:00", "15:30"), "post": ("15:40", "20:00"), "status": "예상"},
+    "2028-11-16": {"why": "수능일", "pre": None, "r": ("10:00", "16:30"), "post": ("17:00", "20:00"), "status": "예상"},
+}
+KR_NORMAL = {"pre": ("08:00", "08:50"), "r": ("09:00", "15:30"), "post": ("15:40", "20:00")}
+
 US_EARLY_CLOSE = {"2026-11-27", "2026-12-24", "2027-11-26", "2028-07-03", "2028-11-24"}   # 정규장 13:00 폐장
 
 LABEL = {"pre": "장전", "r": "정규장", "post": "장후", "closed": "닫힘"}
@@ -68,13 +89,38 @@ def sessions(market, d):
     if not is_trading_day(market, d):
         return []
     if market == "KR":
-        at = lambda hh, mm: datetime.combine(d, time(hh, mm), KST)
-        return [("pre", at(8, 0), at(8, 50)), ("r", at(9, 0), at(15, 30)), ("post", at(15, 40), at(20, 0))]
+        plan = KR_SPECIAL.get(d.isoformat(), KR_NORMAL)
+        at = lambda hm: datetime.combine(d, time(int(hm[:2]), int(hm[3:])), KST)
+        return [(n, at(plan[n][0]), at(plan[n][1])) for n in ("pre", "r", "post") if plan.get(n)]
     tz = timezone(timedelta(hours=ny_offset(d)))
     at = lambda hh, mm: datetime.combine(d, time(hh, mm), tz).astimezone(KST)
     early = d.isoformat() in US_EARLY_CLOSE
     close = at(13, 0) if early else at(16, 0)
     return [("pre", at(4, 0), at(9, 30)), ("r", at(9, 30), close), ("post", close, at(17, 0) if early else at(20, 0))]
+
+
+def regular(market, d):
+    """현지 날짜 d 의 정규장 (시작, 끝) — 한국 시각 datetime. 쉬는 날이면 None."""
+    return next(((s, e) for n, s, e in sessions(market, d) if n == "r"), None)
+
+
+def kr_session_of(ts):
+    """한국 1분 봉(시작 시각 epoch 초)의 시간대: "pre"·"r"·"post". 그날 시간표 밖이면 정규장 앞은 "pre", 뒤는 "post"
+    (수능일 15:31~16:30 은 "r", 새해 첫날 09:00~09:59 는 "pre" — 정규장이 아니다)."""
+    t = datetime.fromtimestamp(ts, KST)
+    for n, s, e in sessions("KR", t.date()):
+        if s <= t < e or (n == "r" and t == e):          # 정규장 끝 시각의 봉(마감 단일가)은 정규장
+            return n
+    r = regular("KR", t.date())
+    if r:
+        return "pre" if t < r[0] else "post"
+    return "pre" if t.hour < 9 else "post"
+
+
+def special(d):
+    """그날이 한국의 시간이 바뀌는 날이면 그 설명 dict, 아니면 None."""
+    x = KR_SPECIAL.get(d.isoformat() if hasattr(d, "isoformat") else str(d))
+    return {"date": d.isoformat() if hasattr(d, "isoformat") else str(d), **{k: (list(v) if isinstance(v, tuple) else v) for k, v in x.items()}} if x else None
 
 
 def _local_date(market, t):
@@ -124,7 +170,8 @@ def status(market, t):
     return {"state": state, "label": LABEL[state], "session_ends": cur[1].isoformat(timespec="minutes") if cur else None,
             "next_open": nxt_open.isoformat(timespec="minutes") if nxt_open else None,
             "next_close": nxt_close.isoformat(timespec="minutes") if nxt_close else None,
-            "trading_day": day.isoformat() if day else None, "calendar_ok": calendar_ok(_local_date(market, t))}
+            "trading_day": day.isoformat() if day else None, "calendar_ok": calendar_ok(_local_date(market, t)),
+            "special": special(day) if (market == "KR" and day) else None}
 
 
 def _next_minute(t):

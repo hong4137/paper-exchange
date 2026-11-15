@@ -244,7 +244,8 @@ export async function quote(symRaw, fetchFn = fetch, nowSec = Math.floor(Date.no
       bars = readNaverMinutes(j);
     } catch (e) { /* 그래프 없이도 현황은 낸다 */ }
     const hm = kstHM(nowSec);
-    const session = rt.ext && rt.ext.open ? rt.ext.session : /OPEN/.test(rt.status) && hm >= 900 && hm <= 1530 ? 'r' : 'closed';
+    // 정규장 여부는 네이버의 장 상태로 본다. 시각 범위는 수능일(10:00~16:30)까지 들어가게 넓게 둔다 (참고용 표시)
+    const session = rt.ext && rt.ext.open ? rt.ext.session : /OPEN/.test(rt.status) && hm >= 900 && hm <= 1630 ? 'r' : 'closed';
     const tick = inferTick(bars.map((b) => b[1]));
     return { symbol: sym, market: 'KR', currency: 'KRW', name: rt.name || sym, price: rt.price, prev: rt.prev, ...chg(rt.price, rt.prev),
              open: rt.open, high: rt.high, low: rt.low, volume: rt.volume, session, ext: rt.ext && { ...rt.ext, ...chg(rt.ext.price, rt.price) },      // 시간외 등락은 정규장 종가 대비 (내 계좌 화면과 같은 기준)
