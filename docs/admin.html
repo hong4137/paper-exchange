@@ -176,7 +176,7 @@ footer{margin:40px 0 50px; padding-top:16px; border-top:1px solid var(--line); c
 .form input,.form select{font:inherit; font-size:14.5px; color:var(--txt); background:var(--ink); border:1px solid var(--line); border-radius:10px; padding:8px 10px; min-width:0; width:150px}
 .form label.chk{display:flex; align-items:center; gap:6px; padding-bottom:9px} .form label.chk input{width:auto}
 .form button,.btn{font:inherit; font-size:14.5px; font-weight:700; color:var(--ink); background:var(--txt); border:0; border-radius:10px; padding:9px 18px; cursor:pointer}
-.form button:disabled{opacity:.5; cursor:default}
+.form button:disabled,.btn:disabled{opacity:.5; cursor:default}
 .form .msg{margin:10px 0 0; font-size:13.5px; color:var(--dim); min-height:1.3em} .form .msg.ok{color:var(--ok)} .form .msg.bad{color:var(--up)}
 .slip .cancel{margin-top:10px; font:inherit; font-size:12.5px; background:transparent; border:1px solid #9aa3b8; color:#333d55; border-radius:99px; padding:4px 12px; cursor:pointer}
 .tabs{display:flex; gap:4px}
@@ -274,7 +274,8 @@ function renderLeague(){
   const rows=L.players.map(p=>({p,r:ret(p)})).sort((x,y)=>((y.r?y.r.pct:-1e9)-(x.r?x.r.pct:-1e9))||x.p.id.localeCompare(y.p.id));
   let rk=0; rows.forEach((x,i)=>{ x.rank=!x.r?'—':(i&&rows[i-1].r&&rows[i-1].r.pct===x.r.pct?rows[i-1].rank:(rk=i+1)); });
   const chips=(L.periods||[]).filter(k=>k.key==='all'||L.players.some(p=>(p.returns||{})[k.key]));
-  const who=p=>`<a href="index.html?a=${encodeURIComponent(p.id)}">${esc(p.name)}</a>${p.agent?` <span class="who">· ${esc(p.agent)}</span>`:''}`;
+  const nm=id=>{const q=L.players.find(x=>x.id===id); return q?q.name:id;};
+  const who=p=>`<a href="index.html?a=${encodeURIComponent(p.id)}">${esc(p.name)}</a>${p.agent?` <span class="who">· ${esc(p.agent)}</span>`:''}${p.parent?` <span class="who">· ${esc(nm(p.parent))}에서 갈라짐</span>`:''}`;
   const contests=(L.contests||[]).map(c=>`<h3 class="ct">${esc(c.name)} <small>${c.start} ~ ${c.end||'끝 없음'} · ${c.status}</small></h3>
     ${c.players.length?`<div class="tblwrap"><table><thead><tr><th>순위</th><th>참가자</th><th>이 기간 수익률</th><th class="c3">비교 기준보다</th><th class="c3">잰 기간</th></tr></thead><tbody>
       ${c.players.map(x=>`<tr class="${x.id===cur?'me':''}"><td class="rk num">${x.rank}</td><td>${who(x)}</td>
@@ -297,8 +298,42 @@ function renderLeague(){
       <td class="num c3">${won(p.fees_krw)}원</td>
       <td class="num c3">${p.opened}</td>
       <td class="c3">${spark(p.curve,L.initial)}</td></tr>`).join('')}
-    </tbody></table></div>${contests}</section>`;
+    </tbody></table></div>${families(nm)}${contests}</section>${forkRequests(nm)}`;
   document.querySelectorAll('.chip.pd').forEach(b=>b.onclick=()=>{period=b.dataset.p;renderLeague()});
+  document.querySelectorAll('button.fk').forEach(b=>b.onclick=async()=>{
+    const reject=b.dataset.a==='reject_fork', box=b.closest('.freq'), msg=box.querySelector('.msg');
+    let why='';
+    if(reject){ const w=prompt('거절하는 까닭 (선수에게 보입니다)',''); if(w===null) return; why=w; }
+    else if(!confirm(b.dataset.acct+' 의 분기 '+b.dataset.fork+' 를 승인할까요? 다음 정기 실행에서 체결 계산이 끝난 뒤 갈라집니다.')) return;
+    msg.textContent='보내는 중입니다.';
+    const r=await post('api/admin',{action:b.dataset.a,account:b.dataset.acct,fork:b.dataset.fork,why});
+    msg.textContent=r.text; msg.className='msg '+(r.ok?'ok':'bad');
+    if(r.ok){ box.querySelectorAll('button').forEach(x=>x.disabled=true); setTimeout(()=>{load(); adminLog();},90*1000); }
+  });
+}
+// 가지(가계): 갈라진 계좌들의 계보와, 갈라진 날을 기준으로 한 형제 비교 (주인만 본다)
+function families(nm){
+  const fs=L.families||[]; if(!fs.length) return '';
+  const tree=f=>{ const kids=id=>f.forks.filter(x=>x.parent===id);
+    const node=(id,d)=>`<div style="padding-left:${d*18}px">${d?'└ ':''}<b>${esc(nm(id))}</b> <span class="who">${esc(id)}</span>${(f.forks.find(x=>x.child===id)||{}).at?` <span class="who">· ${esc((f.forks.find(x=>x.child===id).at||'').slice(0,16).replace('T',' '))} 갈라짐</span>`:''}</div>`+kids(id).map(k=>node(k.child,d+1)).join('');
+    return node(f.root,0); };
+  const sv=x=>x?`<span class="${cls(x.pct)}">${pct(x.pct)}</span>`:'<span class="who">아직 없음</span>';
+  return `<h3 class="ct">가지 <small>갈라진 계좌의 계보 · 형제는 갈라진 날의 총자산을 기준으로 견줍니다</small></h3>`+fs.map(f=>`<div class="tblwrap" style="padding:10px 12px">${tree(f)}</div>
+    ${f.forks.length?`<div class="tblwrap"><table><thead><tr><th>분기</th><th>갈라진 때</th><th>원본</th><th>그 뒤 수익률</th><th>복제본</th><th>그 뒤 수익률</th></tr></thead><tbody>
+      ${f.forks.map(x=>`<tr><td>${esc(x.fork||'')}</td><td class="num">${esc((x.at||'').slice(0,16).replace('T',' '))}</td>
+        <td>${esc(nm(x.parent))}</td><td class="num">${sv(x.since[x.parent])}</td><td>${esc(nm(x.child))}</td><td class="num">${sv(x.since[x.child])}</td></tr>`).join('')}
+    </tbody></table></div>`:''}`).join('');
+}
+// 승인을 기다리는 분기 요청 — 논거 글은 여기에만 보인다 (승인·거절하면 거래소 자료에서 지운다. 원본은 운용 일지에)
+function forkRequests(nm){
+  const rs=L.fork_requests||[]; if(!rs.length) return '';
+  return `<section><h2>분기 요청 <small>${rs.length}건 · 승인하면 다음 정기 실행에서 체결 계산이 끝난 뒤 갈라집니다 (가지마다 최대 ${L.fork_max_accounts||5}계좌)</small></h2>`+
+    rs.map(r=>`<div class="freq tblwrap" style="padding:12px 14px;margin-bottom:10px">
+      <div><b>${esc(r.name)}</b> <span class="who">${esc(r.account)} · ${esc(r.fork)}${r.ref?' · 꼬리표 '+esc(r.ref):''} · ${esc(when(r.requested_at))}</span></div>
+      ${Object.entries(r.arguments||{}).map(([k,v])=>`<div style="margin-top:10px"><div class="who">${esc(k)}</div><div style="white-space:pre-wrap;line-height:1.6">${esc(v)}</div></div>`).join('')||'<p class="who">논거 글이 없습니다.</p>'}
+      <div style="margin-top:12px;display:flex;gap:8px"><button class="btn fk" data-a="approve_fork" data-acct="${esc(r.account)}" data-fork="${esc(r.fork)}">승인</button>
+      <button class="btn fk" data-a="reject_fork" data-acct="${esc(r.account)}" data-fork="${esc(r.fork)}" style="background:transparent;color:var(--dim);border:1px solid var(--line)">거절</button></div>
+      <p class="msg"></p></div>`).join('')+`</section>`;
 }
 async function load(){
   try{

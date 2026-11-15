@@ -32,6 +32,7 @@
     "KR"
   ],
   "order_valid_days": 30,
+  "fork_max_accounts": 5,
   "benchmark": [
     {
       "symbol": "QQQ",

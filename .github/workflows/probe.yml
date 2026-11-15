@@ -28,6 +28,7 @@ jobs:
           python tests/test_money.py
           python tests/test_league.py
           python tests/test_operator.py
+          python tests/test_fork.py
           node tests/test_site.mjs
           node tests/test_market.mjs
       - name: 시세 원천 열리는지
