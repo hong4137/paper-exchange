@@ -191,7 +191,8 @@ export async function submitOrder(body, me, env, fetchFn = fetch, now = new Date
 }
 
 const ADMIN_ACTIONS = { add_player: ['id', 'github', 'email', 'login', 'name', 'agent'], remove_player: ['id', 'github'],
-                        add_contest: ['name', 'start', 'end'], remove_contest: ['name'] };
+                        add_contest: ['name', 'start', 'end'], remove_contest: ['name'],
+                        approve_fork: ['account', 'fork'], reject_fork: ['account', 'fork', 'why'] };
 
 /** 관리 명령을 자료 저장소의 admin/ 에 요청 파일로 올린다 (관리자만 부른다 — handle 이 확인한다). */
 export async function submitAdmin(body, env, fetchFn = fetch, now = new Date()) {

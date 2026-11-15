@@ -6,7 +6,8 @@
 돈은 원화·달러 두 주머니다. 한국 주식은 원화로, 미국 주식은 달러로 사고판다 (판 돈도 달러로 남는다).
   달러가 모자란 미국 주식 매수는 모자란 만큼만 자동으로 환전한다 (config.json "usd_shortfall": "auto", 아니면 거부).
   비용(수수료·세금·환전)은 config.json "fees", 배당·액면분할은 시세 캐시의 events 를 보고 settle 이 장부에 적는다.
-장부 줄 종류: open · order · cancel · fill · reject · expire · refuse · fx(환전) · dividend(배당) · split(분할·병합) · watch·unwatch(값 조건 지켜보기).
+장부 줄 종류: open · order · cancel · fill · reject · expire · refuse · fx(환전) · dividend(배당) · split(분할·병합) · watch·unwatch(값 조건 지켜보기) ·
+  fork_request·fork_approve·fork_reject·fork(계좌 분기 — execute_forks 설명 참조).
   옛 fill 줄(ccy·delta 가 없는 것)은 원화 한 주머니 시절 것으로 읽는다.
 
 참가자가 여럿이다 (config.json "players" — 주인이 넣은 GitHub 계정 명단). 계좌는 참가자마다 하나, 장부도 계좌마다 하나다.
@@ -129,6 +130,11 @@ def pick(account_id):
     if not account_id:
         return next(x for x in accts if x["main"])
     a = next((x for x in accts if x["id"] == str(account_id).lower()), None)
+    aid = str(account_id).lower()
+    if not a and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,38}", aid) and not (HOME / "players.json").exists() \
+            and (HOME / "accounts" / aid / "ledger.jsonl").exists():
+        # 에이전트가 자기 계좌만 받아 간 폴더 (명단 파일 없이 accounts/{이름표}/ 만 있다) — 읽기 명령(status·check·quote)용
+        a = {"id": aid, "github": None, "name": aid, "agent": None, "main": False}
     if not a:
         sys.exit(f"명단에 없는 계좌입니다: {account_id}")
     return a
@@ -235,7 +241,8 @@ def build_league():
                      "n_filled": s["n_filled"], "fees_krw": s["fees_krw"], "integrity_ok": st["integrity"]["ok"],
                      "returns": {p["key"]: p for p in (st.get("performance") or {}).get("periods", [])},
                      "max_drawdown_pct": ((st.get("performance") or {}).get("max_drawdown") or {}).get("pct"),
-                     "curve": [e["total"] for e in st["equity"]][-120:], "_equity": st["equity"], "_initial": st["initial"]})
+                     "curve": [e["total"] for e in st["equity"]][-120:], "_equity": st["equity"], "_initial": st["initial"],
+                     "lineage": st.get("lineage"), "_forks": st.get("forks") or []})
 
     def ranked(items, key):                             # 수익률 순, 같으면 같은 순위
         items.sort(key=lambda r: (-(key(r) if key(r) is not None else -1e9), r["id"]))
@@ -258,11 +265,43 @@ def build_league():
         contests.append({"name": c.get("name") or "대회", "start": start, "end": end,
                          "status": "예정" if today < start else ("끝남" if end and today > end else "진행 중"),
                          "players": ranked(entries, lambda r: r["pct"])})
+    # 가지(가계): 갈라진 계좌들을 계보로 묶고, 갈라진 날 기준으로 형제를 견준다
+    pl = {str(p.get("id") or p.get("github") or "").lower(): p for p in cfg.get("players") or []}
+    byid = {r["id"]: r for r in rows}
+    families, seen_root = [], set()
     for r in rows:
-        del r["_equity"], r["_initial"]
+        root, fam = family_of(cfg, r["id"])
+        r["family"], r["parent"], r["forked_at"] = root, pl.get(r["id"], {}).get("parent"), pl.get(r["id"], {}).get("forked_at")
+        if root in seen_root or len(fam) < 2:
+            continue
+        seen_root.add(root)
+        forks = []
+        for cid in fam:
+            pp = pl.get(cid, {})
+            if not pp.get("parent") or cid not in byid or pp["parent"] not in byid:
+                continue
+            day = (pp.get("forked_at") or "")[:10]
+            nxt = (datetime.strptime(day, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d") if day else None
+            since = {}
+            for x in (pp["parent"], cid):          # 갈라진 날의 총자산을 기준으로 그 뒤의 수익률
+                sr = span_return(byid[x]["_equity"], byid[x]["_initial"], nxt) if nxt else None
+                since[x] = sr
+            forks.append({"fork": pp.get("fork"), "parent": pp["parent"], "child": cid, "at": pp.get("forked_at"), "since": since})
+        families.append({"root": root, "members": [m for m in fam if m in byid], "forks": forks})
+    requests = []                                       # 승인을 기다리는 분기 (논거 글은 여기·관리자 화면에만)
+    for r in rows:
+        for f in r["_forks"]:
+            if f["status"] == "requested":
+                note = _fork_note_path(r["id"], f["id"])
+                nd = json.loads(note.read_text(encoding="utf-8")) if note.exists() else {}
+                requests.append({"account": r["id"], "name": r["name"], "fork": f["id"], "ref": f.get("ref"),
+                                 "requested_at": f.get("requested_at") or f.get("ts"), "arguments": nd.get("arguments")})
+    for r in rows:
+        del r["_equity"], r["_initial"], r["_forks"]
     out = {"name": (cfg.get("league") or {}).get("name") or "모의 거래소", "updated": now().isoformat(timespec="seconds"),
            "initial": cfg["initial_cash"], "periods": [{"key": k, "label": l} for k, l, _ in PERIODS] + [{"key": "ytd", "label": "올해"}, {"key": "all", "label": "처음부터"}],
-           "players": rows, "contests": contests}
+           "players": rows, "contests": contests, "families": families, "fork_requests": requests,
+           "fork_max_accounts": _fork_limit(cfg)}
     LEAGUE_OUT.parent.mkdir(parents=True, exist_ok=True)
     LEAGUE_OUT.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
     return out
@@ -357,7 +396,7 @@ def replay(events):
           "moves": [],                # 돈·수량이 움직인 모든 일 {date, krw, usd, symbol, qty} — 자산 곡선에 쓴다
           "costs": {"commission": 0.0, "tax": 0.0, "fx": 0.0},      # 낸 비용 (원화로)
           "dividends": [], "div_by_order": {}, "splits": {}, "actions": set(), "us_gain": {}, "fx_log": [],
-          "watches": {}}
+          "watches": {}, "forks": {}, "children": [], "lineage": None}
     for e in events:
         t, d = e["type"], e["data"]
         if t == "open":
@@ -386,6 +425,25 @@ def replay(events):
             w["status"], w["result"] = "removed", {"ts": e["ts"], "why": d.get("why")}
             if d.get("client_id"):
                 st["seen"].add(d["client_id"])
+        elif t == "fork_request":                       # 계좌 분기 요청 (주인 승인 전에는 아무 일도 없다)
+            st["forks"][d["id"]] = {**d, "ts": e["ts"], "seq": e["seq"], "status": "requested", "approved_at": None,
+                                    "done_at": None, "child": None, "why": None}
+            if d.get("client_id"):
+                st["seen"].add(d["client_id"])
+        elif t == "fork_approve":
+            st["forks"][d["fork"]].update(status="approved", approved_at=e["ts"])
+        elif t == "fork_reject":
+            st["forks"][d["fork"]].update(status="rejected", why=d.get("why"), done_at=e["ts"])
+        elif t == "fork":                               # 갈라짐 — 원본(role=parent)과 복제본(role=child) 장부 양쪽에 남는다
+            if d["role"] == "parent":
+                if d["fork"] in st["forks"]:
+                    st["forks"][d["fork"]].update(status="done", done_at=e["ts"], child=d["child"])
+                st["children"].append({"child": d["child"], "parent": d["parent"], "fork": d["fork"], "at": e["ts"], "at_seq": d["at_seq"]})
+            else:                                       # 이 계좌가 태어난 줄 — 이어받은 요청(원본의 것)은 끝난 것으로 본다
+                if d["fork"] in st["forks"]:
+                    st["forks"][d["fork"]].update(status="done", done_at=e["ts"], child=d["child"])
+                st["lineage"] = {"parent": d["parent"], "fork": d["fork"], "at": e["ts"], "at_seq": d["at_seq"], "head": d["head"],
+                                 "seq": e["seq"]}
         elif t in ("reject", "expire"):
             o = st["orders"][d["order"]]
             o["status"] = "rejected" if t == "reject" else "expired"
@@ -983,6 +1041,16 @@ def build():
             txt = f"지켜보기 {d['id']} — {d.get('name') or d['symbol']}: {cond} (~{d['valid_until']})"
         elif t == "unwatch":
             txt = f"지켜보기 {d['watch']} 를 거뒀습니다 — {d.get('why') or ''}"
+        elif t == "fork_request":
+            txt = f"분기 요청 {d['id']} — 주인의 승인을 기다립니다"
+        elif t == "fork_approve":
+            txt = f"분기 {d['fork']} 승인 — 다음 정기 실행에서 체결 계산이 끝난 뒤 갈라집니다"
+        elif t == "fork_reject":
+            txt = f"분기 {d['fork']} 거절 — {d.get('why') or ''}"
+        elif t == "fork" and d["role"] == "parent":
+            txt = f"분기 {d['fork']} — 여기서 {d['child']} 이(가) 갈라져 나갔습니다 (장부 {d['at_seq']}번째 줄까지 같음)"
+        elif t == "fork":
+            txt = f"분기 {d['fork']} — {d['parent']} 의 장부 {d['at_seq']}번째 줄(지문 {d['head'][:12]})에서 갈라져 이 계좌가 생겼습니다"
         else:
             continue
         feed.append({"seq": e["seq"], "ts": e["ts"], "type": t, "text": txt})
@@ -1041,6 +1109,11 @@ def build():
         "quotes": quotes,
         "watches": watches,
         "watch_hits": [w for w in watches if w["status"] == "hit"],
+        "lineage": st["lineage"],
+        "children": [c for c in st["children"] if c["parent"] == ACCT["id"]],
+        "forks": [{k: f.get(k) for k in ("id", "ref", "client_id", "requested_at", "ts", "status", "approved_at", "done_at", "child", "why")}
+                  for f in sorted(st["forks"].values(), key=lambda f: f["id"], reverse=True)
+                  if f["seq"] > ((st["lineage"] or {}).get("at_seq") or 0)],      # 이어받기 전(원본 시절)의 요청은 빼고
     }
     STATE_OUT.parent.mkdir(parents=True, exist_ok=True)
     STATE_OUT.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -1351,6 +1424,143 @@ def watch_result(w, today):
     return "watching", None
 
 
+# ---------- 계좌 분기 (복제) ----------
+# 에이전트 계좌가 창구로 분기를 요청하면(양쪽 논거 글 포함) 주인이 관리자 화면에서 승인하고, 다음 정기 실행에서 체결 계산이 끝난 뒤 갈라진다.
+# 복제본은 원본 장부의 지금까지 줄을 그대로 이어받고(지문 사슬도 그대로) 그 뒤에 "어디서 갈라졌는지" 줄을 단다 — 보유·예수금·대기 주문·지켜보기가 전부 따라가고,
+# 수익률은 원본의 처음부터 이어진다. 형제 비교는 갈라진 날 기준으로 따로 잰다(league.json families).
+# 논거 글은 운용자의 생각이다 — 장부·계좌 화면 자료에는 싣지 않는다. 자료 폴더 forks/ 에 승인 전까지만 두고(관리자 화면에만 보인다) 승인·거절하면 지운다.
+FORK_DIR = "forks"
+
+
+def _fork_note_path(acct_id, fid):
+    return HOME / FORK_DIR / f"{acct_id}-{fid}.json"
+
+
+def family_of(cfg, acct_id):
+    """acct_id 가 속한 가지(가계) — 맨 위 계좌와 그 자손 이름표들 (명단의 parent 로 잇는다)."""
+    players = {str(p.get("id") or p.get("github") or "").lower(): p for p in cfg.get("players") or []}
+    root = acct_id
+    while players.get(root, {}).get("parent") in players:
+        root = players[root]["parent"]
+    fam, todo = [], [root]
+    while todo:
+        x = todo.pop(0)
+        fam.append(x)
+        todo += sorted((k for k, p in players.items() if p.get("parent") == x), key=lambda k: players[k].get("forked_at") or "")
+    return root, fam
+
+
+def _fork_limit(cfg):
+    return int(cfg.get("fork_max_accounts") or 5)
+
+
+def place_fork(p, dry=False):
+    """분기 요청. p: ref, arguments(논거 — 글 또는 {이름: 글}), client_id, requested_at. 반환 분기 번호(F0001)."""
+    cfg = config()
+    st = replay(read_ledger())
+    if st["opened"] is None:
+        raise Refused("계좌가 없습니다")
+    if ACCT["main"] or not ACCT.get("agent"):
+        raise Refused("분기는 에이전트 계좌만 요청할 수 있습니다")
+    if any(f["status"] in ("requested", "approved") for f in st["forks"].values()):
+        raise Refused("이미 기다리는 분기 요청이 있습니다")
+    root, fam = family_of(cfg, ACCT["id"])
+    if len(fam) >= _fork_limit(cfg):
+        raise Refused(f"이 가지의 계좌가 이미 {len(fam)}개입니다 (최대 {_fork_limit(cfg)}개)")
+    args = p.get("arguments")
+    if isinstance(args, str):
+        args = {"논거": args}
+    if not isinstance(args, dict) or not args or len(args) > 5 \
+            or not all(isinstance(v, str) and v.strip() for v in args.values()):
+        raise Refused("분기 요청에는 논거 글(arguments)이 있어야 합니다 — 글 하나 또는 {이름: 글} (다섯 개까지)")
+    args = {str(k)[:40]: v[:6000] for k, v in args.items()}
+    fid = f"F{sum(1 for e in read_ledger() if e['type'] == 'fork_request') + 1:04d}"
+    data = {"id": fid, "ref": str(p.get("ref") or "")[:80]}
+    if p.get("client_id"):
+        data["client_id"] = p["client_id"]
+        data["requested_at"] = p.get("requested_at")
+    if dry:
+        return data
+    note = _fork_note_path(ACCT["id"], fid)
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text(json.dumps({"account": ACCT["id"], "fork": fid, "ref": data["ref"], "arguments": args,
+                                "requested_at": p.get("requested_at"), "received_at": now().isoformat(timespec="seconds")},
+                               ensure_ascii=False, indent=1), encoding="utf-8")
+    append("fork_request", data)
+    return fid
+
+
+def fork_admin(cfg, req):
+    """관리 명령 approve_fork·reject_fork {account, fork, why}. 승인·거절을 그 계좌 장부에 적고 논거 글을 지운다."""
+    acct_id = str(req.get("account") or "").lower()
+    acct = next((x for x in accounts(cfg) if x["id"] == acct_id), None)
+    if not acct:
+        raise Refused(f"`{acct_id}` 은(는) 명단에 없습니다")
+    here = ACCT
+    use(acct)
+    try:
+        st = replay(read_ledger())
+        fid = str(req.get("fork") or "")
+        f = st["forks"].get(fid)
+        if not f or f["status"] != "requested":
+            raise Refused(f"승인·거절할 수 있는 분기 요청이 아닙니다 ({acct_id} {fid})")
+        if req["action"] == "approve_fork":
+            root, fam = family_of(cfg, acct_id)
+            if len(fam) >= _fork_limit(cfg):
+                raise Refused(f"이 가지의 계좌가 이미 {len(fam)}개입니다 (최대 {_fork_limit(cfg)}개)")
+            append("fork_approve", {"fork": fid})
+            msg = f"`{acct_id}` 의 분기 {fid} 를 승인했습니다. 다음 정기 실행에서 체결 계산이 끝난 뒤 갈라집니다"
+        else:
+            append("fork_reject", {"fork": fid, "why": str(req.get("why") or "주인이 거절")[:200]})
+            msg = f"`{acct_id}` 의 분기 {fid} 를 거절했습니다"
+        _fork_note_path(acct_id, fid).unlink(missing_ok=True)
+        return msg
+    finally:
+        use(here)
+
+
+def _next_agent_id(cfg):
+    used = [int(m.group(1)) for x in accounts(cfg) for m in [re.fullmatch(r"p(\d+)", x["id"])] if m]
+    used += [int(m.group(1)) for d in (HOME / "accounts").glob("p*") for m in [re.fullmatch(r"p(\d+)", d.name)] if m] \
+        if (HOME / "accounts").exists() else []
+    return (max(used) if used else 0) + 1
+
+
+def execute_forks():
+    """승인된 분기를 실행한다 (정기 실행에서 체결 계산 뒤). 반환: 갈라진 것 목록."""
+    cfg, here, done = config(), ACCT, []
+    for acct in accounts(cfg):
+        use(acct)
+        st = replay(read_ledger())
+        for f in [f for f in st["forks"].values() if f["status"] == "approved"]:
+            root, fam = family_of(cfg, acct["id"])
+            if len(fam) >= _fork_limit(cfg):
+                append("fork_reject", {"fork": f["id"], "why": f"가지의 계좌가 이미 {len(fam)}개라 갈라지지 못했습니다"})
+                continue
+            n = _next_agent_id(cfg)
+            child = {"id": f"p{n}", "name": f"{n}호", "main": False, "github": None, "agent": acct["agent"]}
+            events = read_ledger()
+            k, head = len(events), events[-1]["hash"]
+            info = {"fork": f["id"], "parent": acct["id"], "child": child["id"], "at_seq": k, "head": head}
+            # 복제본: 원본의 지금까지 줄을 그대로 (지문 사슬 그대로) + 갈라진 줄
+            cpath = HOME / "accounts" / child["id"] / "ledger.jsonl"
+            if cpath.exists():
+                raise SystemExit(f"{cpath} 가 이미 있습니다 — 분기를 멈춥니다")
+            cpath.parent.mkdir(parents=True, exist_ok=True)
+            cpath.write_text("".join(json.dumps(e, ensure_ascii=False) + "\n" for e in events), encoding="utf-8")
+            use(child)
+            append("fork", {**info, "role": "child"})
+            use(acct)
+            append("fork", {**info, "role": "parent"})
+            cfg.setdefault("players", []).append({"id": child["id"], "name": child["name"], "agent": acct["agent"],
+                                                  "parent": acct["id"], "fork": f["id"], "forked_at": now().isoformat(timespec="seconds")})
+            _save_config(cfg)
+            done.append(info)
+            print(f"  분기 {acct['id']} {f['id']} → {child['id']} (장부 {k}줄에서)")
+    use(here)
+    return done
+
+
 def check_request(req):
     """요청 하나(창구 파일과 같은 모양)를 거래소 규칙으로 검사만 한다 — 장부에 아무것도 쓰지 않는다.
     반환 {"ok": True, "action", "would": 접수될 내용, "earliest_fill"} 또는 {"ok": False, "why"}."""
@@ -1371,8 +1581,10 @@ def check_request(req):
             return {"ok": True, "action": act, "would": {"watch": w["id"]}}
         if act == "watch":
             return {"ok": True, "action": act, "would": place_watch(req, dry=True)}
+        if act == "fork":
+            return {"ok": True, "action": act, "would": place_fork(req, dry=True)}
         if act != "order":
-            raise Refused("모르는 요청입니다 (order·cancel·watch·unwatch)")
+            raise Refused("모르는 요청입니다 (order·cancel·watch·unwatch·fork)")
         try:
             data = place_order(req, dry=True)
         except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
@@ -1454,8 +1666,11 @@ def handle_request(req, cid):
                 raise Refused(f"거둘 수 없는 지켜보기입니다 ({req.get('watch')})")
             append("unwatch", {"watch": w["id"], "why": str(req.get("why") or "운용자 요청")[:200], "client_id": cid})
             return "ok", f"지켜보기 {w['id']} 를 거뒀습니다"
+        if req.get("action") == "fork":
+            fid = place_fork(req)
+            return "ok", f"분기 요청을 받았습니다 — {fid} (주인이 승인하면 다음 정기 실행에서 갈라집니다)"
         if req.get("action", "order") != "order":
-            raise Refused("모르는 요청입니다 (order·cancel·watch·unwatch)")
+            raise Refused("모르는 요청입니다 (order·cancel·watch·unwatch·fork)")
         try:
             oid = place_order(req)
         except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
@@ -1653,8 +1868,11 @@ def cmd_admin_inbox(a):
         try:
             if req is None:
                 raise Refused("요청 파일을 읽을 수 없습니다")
-            msg, ok = admin_do(cfg, req), True
-            changed = True
+            if req.get("action") in ("approve_fork", "reject_fork"):
+                msg, ok = fork_admin(cfg, req), True
+            else:
+                msg, ok = admin_do(cfg, req), True
+                changed = True
         except Refused as e:
             msg, ok = f"하지 않았습니다 — {e}", False
         log.append({"at": now().isoformat(timespec="seconds"), "action": (req or {}).get("action"), "ok": ok,
@@ -1729,6 +1947,9 @@ def each_account(a):
 
 
 def cmd_update(a):
+    if os.environ.get("PAPER_OFFLINE"):                  # 시험: 원천에 묻지 않는다
+        print("  (시험 — 시세 갱신을 건너뜁니다)")
+        return
     cfg, t = config(), now()
     keys, need = set(), set()
     for _ in each_account(a):                             # 시세는 모든 계좌가 함께 쓴다
@@ -1791,6 +2012,8 @@ def cmd_daily(a):
     cmd_ingest(a)                                         # 주문 창구 (주인 inbox/, 참가자 inbox/{이름표}/)
     print("가격 갱신"); cmd_update(a)
     print("체결"); cmd_settle(a)
+    if execute_forks():                                   # 승인된 분기: 체결 계산이 끝난 뒤 갈라진다
+        use(pick(None))
     cmd_build(a)
 
 

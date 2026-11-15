@@ -132,6 +132,25 @@ retired/              (엔진) 쓰지 않게 된 이슈 창구·이슈 양식·�
 - 명단·주문 이슈·같은 조건은 사용자가 고르지 않아 **내가 정한 기본값**이다. 바꾸려면 사용자에게 묻는다.
   실제로 대회를 열 때 물을 것: 대기 주문을 남에게 가릴지, 한 사람이 계좌를 여럿 가질 수 있는지, 대회용으로 새 계좌에서 다 같이 출발할지.
 
+### 계좌 분기와 형제 가리기 (감독 결정 → 사용자 2026-11-15)
+운용 구상: 선수(에이전트)가 고민되는 순간에 결정을 분기한다 = 그 시점 계좌를 그대로 복제해 두 캐릭터가 나눠 갖는다. "팔고 그 돈으로 사기"(조건 주문)는 건의를 거뒀다 — 만들지 않는다.
+- **에이전트 계좌**: 명단에 `agent` 가 있고 주인 계좌가 아닌 것. 선수 1호 = `p1`(주인 계좌는 사용자 것). 관리자 화면에서 이메일 없이 넣는다.
+- **요청**: 그 계좌의 창구 `inbox/{이름표}/` 에 `{"client_id", "action": "fork", "ref", "arguments": "글" | {"이름": "글", …(5개까지)}, "requested_at"}`.
+  장부 `fork_request {id: F0001, ref, client_id, requested_at}` — 아무것도 바뀌지 않는다. 기다리는 요청이 있거나, 가지의 계좌가 상한이거나, 논거가 없으면 `refuse`.
+- **논거 글**(운용자의 생각): 장부·계좌 화면 자료에 싣지 않는다. 자료 폴더 `forks/{이름표}-{F번호}.json` 에 승인 전까지만 두고 관리자 화면(league.json `fork_requests`)에만 보인다. 승인·거절하면 지운다(사용자 결정 2026-11-15 — 원본은 일지에, 지운 사본은 자료 저장소의 지난 기록에 남는다).
+- **승인**: 주인만, 관리자 화면 → `admin/` 에 `{"action": "approve_fork" | "reject_fork", "account", "fork", "why"}` → 그 계좌 장부에 `fork_approve` / `fork_reject {fork, why}`.
+- **갈라짐**: 승인 뒤 다음 정기 실행(`daily`)에서 체결 계산(settle)이 끝난 다음 `execute_forks()`. 새 이름표 = 다음 `p{번호}`(태어난 순서), 화면 이름 "{번호}호"(주인이 add_player 로 바꾼다).
+  복제본 장부 = 원본 장부의 그때까지 줄을 **그대로**(지문 사슬 그대로) + `fork {role: child, fork, parent, child, at_seq, head}`. 원본 장부에는 `fork {role: parent, …}`. 그래서 보유·예수금·대기 주문·지켜보기가 전부 따라가고 수익률은 원본의 처음부터 이어진다.
+  명단(players.json)에 `{id, name, agent, parent, fork, forked_at}`. 상한 = 가지(맨 위 계좌와 자손)의 만들어진 계좌 수, `config.json` 의 `fork_max_accounts`(기본 5). 닫는 기능은 없다.
+- **state.json 에 더한 것**: `lineage`(복제본이면 `{parent, fork, at, at_seq, head, seq}`, 아니면 null) · `children[]`(`{child, parent, fork, at, at_seq}`) ·
+  `forks[]`(`{id, ref, client_id, requested_at, ts, status: requested|approved|done|rejected, approved_at, done_at, child, why}` — 이어받기 전 원본 시절 것은 빠진다).
+- **league.json 에 더한 것**: `players[]` 의 `lineage`·`family`(맨 위 계좌)·`parent`·`forked_at`, `families[]`(`{root, members, forks: [{fork, parent, child, at, since: {이름표: span_return}}]}` — 갈라진 날의 총자산 기준), `fork_requests[]`(`{account, name, fork, ref, requested_at, arguments}`), `fork_max_accounts`.
+- 대회에서 가지 계좌를 어떻게 다룰지는 정하지 않았다 — 대회를 실제로 열 때 사용자에게 묻는다.
+- **형제 가리기**(가리는 것: 계좌·주문·수익률. 형제의 이름·개수와 공유 시세는 알아도 된다. 주인·감독은 전부 본다): 캐릭터는 자료 저장소를 통째로 받지 않고 **자기 계좌 것만 받는다**(sparse checkout).
+  받을 것: `accounts/{이름표}/`, `docs/data/accounts/{이름표}.json`, `inbox/{이름표}/`, `data/`, `.ledger-lock`. 명단(`players.json`)·다른 계좌·`league.json`·`forks/` 는 받지 않는다.
+  명단 파일이 없는 폴더에서도 `--account {이름표}` 의 읽기 명령(`status`·`check`·`quote`)이 된다(`pick()` — 그 계좌 폴더만 있으면). 쓰는 명령은 `.ledger-lock` 으로 잠긴다.
+  **약속이지 잠금은 아니다** — 같은 GitHub 열쇠로는 다른 파일도 받을 수 있다. 진짜로 막으려면 계좌별 열쇠(문지기)가 필요하다 — 필요해지면 사용자에게 묻는다.
+
 ### 화면은 sharktalk 로, 로그인은 sharktalk 로그인으로 (사용자 결정 2026-11-14 — 2026-11-15 올림, 지금 상태는 `RESUME.md`)
 사용자: 관리자 화면은 "진짜 로그인(저장소 비공개)"으로 잠근다 → "결국 사이트는 sharktalk 로 서빙해야 한다" → "sharktalk 는 그것(바둑 사이트) 말고도 엄청나게 많다."
 - **sharktalk 가 무엇인가**(지난 대화 기록 27개를 훑어 확인한 것 — 이 세션은 사용자 PC 의 `통합 개발` 폴더를 볼 수 없다):
