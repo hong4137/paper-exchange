@@ -11,6 +11,7 @@
 - **비밀 설정 두 가지가 아직 없다** → 로그인해도 "거래소 자료를 읽지 못했습니다"가 나온다. 사용자가 직접 넣는다:
   `npx wrangler secret put GITHUB_TOKEN` (저장소 paper-exchange 의 Contents·Issues 읽기/쓰기 토큰, `운영-안내.md` 1번),
   `npx wrangler secret put ADMIN_EMAILS` (관리자의 sharktalk 로그인 이메일, 여럿이면 쉼표).
+- 2026-11-15 다시 올림 (주문 페이지 `trade.html`, 시세 `/api/market`·`/api/search`·`/api/quote` 포함). 로그인 없이 이 주소들도 401 로 막히는 것을 직접 요청해 확인했다. 비밀 설정 두 가지는 들어가 있다.
 - 저장소는 아직 공개, GitHub Pages 주소도 아직 열려 있다. 비공개 전환은 확인이 끝난 뒤 사용자가 한다.
 - 포털 메뉴에는 올리지 않았다 (따로 정한다).
 
