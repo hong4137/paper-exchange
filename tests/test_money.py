@@ -269,7 +269,7 @@ daily(h, "AAA", "US", 100)
 daily(h, "USDKRW", "FX", 1300)
 daily(h, "QQQ", "US", 600)
 daily(h, "069500", "KR", 80000)
-lines = [json.loads((ROOT / "ledger" / "ledger.jsonl").read_text(encoding="utf-8").splitlines()[0])]   # 실제 장부의 개설 줄 그대로
+lines = [json.loads((ROOT / "tests" / "fixtures" / "old_open_line.jsonl").read_text(encoding="utf-8").splitlines()[0])]   # 실제 장부(2026-11-14)의 개설 줄 그대로 — 장부는 이제 자료 저장소에 있어 한 줄만 떠 두었다
 
 
 def old_line(kind, data, ts):

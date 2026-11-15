@@ -1,16 +1,5 @@
 {
   "account_name": "모의 계좌 1호",
-  "league": {
-    "name": "모의 거래소",
-    "contests": []
-  },
-  "players": [
-    {
-      "github": "hong4137",
-      "name": "hong4137",
-      "main": true
-    }
-  ],
   "base_currency": "KRW",
   "initial_cash": 50000000,
   "opened": "2026-11-14",
