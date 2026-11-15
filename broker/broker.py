@@ -38,6 +38,7 @@
   운용자는 주문 요청 파일을 inbox/ 에 올리기만 하고, 거래소가 받아서 자기 시각으로 접수한다.
   그래서 이 PC 에서 open·order·cancel·settle·daily·ingest·build 를 직접 돌리면 거절된다 (읽기 전용인 status·verify 는 된다).
 시험할 때는 환경변수 PAPER_HOME(임시 폴더), PAPER_NOW(가짜 현재 시각)를 쓴다 — 그때는 잠금이 풀린다.
+  단 PAPER_HOME 이 실제 자료 저장소(표지 파일 .ledger-lock 이 있는 폴더)면 풀리지 않는다 — GitHub 자동 실행만 쓴다.
 """
 import argparse
 import hashlib
@@ -1549,8 +1550,10 @@ def main():
     a = p.parse_args()
     # 장부는 거래소 한 곳만 쓴다: 클라우드가 쓰기로 정해져 있으면 이 PC 에서는 읽기만 한다 (시험 폴더는 예외)
     writes = {"open", "order", "cancel", "ingest", "issue", "admin-inbox", "update", "settle", "build", "daily"}
+    # 자료 저장소(paper-exchange-data)를 받아 둔 폴더에는 .ledger-lock 표지가 있다 — PAPER_HOME 으로 가리켜도 쓰지 못한다
+    real = (HOME / ".ledger-lock").exists()
     if (a.cmd in writes and config().get("ledger_writer") == "cloud" and not os.environ.get("GITHUB_ACTIONS")
-            and not os.environ.get("PAPER_HOME")):
+            and (real or not os.environ.get("PAPER_HOME"))):
         sys.exit("이 장부는 클라우드 거래소(GitHub 자동 실행)만 씁니다. 주문은 일지 도구로 요청하고, 상태는 git pull 로 받아 보세요.")
     use(pick(a.account))
     a.f(a)

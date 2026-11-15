@@ -234,6 +234,15 @@ led.write_text(led.read_text(encoding="utf-8").replace('"qty": 100', '"qty": 900
 check("한 사람 장부라도 손대면 검증이 실패한다", run(WED, "verify", ok=False).returncode != 0)
 check("--account 로 한 계좌만 본다", "원화 예수금 50,000,000원" in run(WED, "--account", "bob99", "status").stdout)
 
+# 실제 자료 저장소를 받아 둔 폴더(.ledger-lock 표지)는 PAPER_HOME 으로 가리켜도 쓰는 명령이 거절된다 — 읽기만
+n = len(ledger())
+(tmp / ".ledger-lock").write_text("", encoding="utf-8")
+r = run(WED, "order", "--symbol", "AAA", "--side", "buy", "--qty", "1", ok=False, env={"GITHUB_ACTIONS": ""})
+check("실제 자료 폴더에서는 이 PC 의 주문이 거절된다", r.returncode != 0 and "클라우드" in (r.stdout + r.stderr) and len(ledger()) == n, r.stdout + r.stderr)
+check("실제 자료 폴더에서도 상태 보기는 된다", run(WED, "--account", "bob99", "status", env={"GITHUB_ACTIONS": ""}).returncode == 0)
+check("GitHub 자동 실행은 실제 자료 폴더에 쓴다", run(WED, "build", env={"GITHUB_ACTIONS": "true"}).returncode == 0)
+(tmp / ".ledger-lock").unlink()
+
 shutil.rmtree(tmp, ignore_errors=True)
 print(f"\n{'전부 통과' if not fails else '실패 ' + str(len(fails)) + '건'}")
 sys.exit(1 if fails else 0)

@@ -43,7 +43,8 @@
   - `deploy.yml`(site-deploy) — `main` 의 화면·문지기·`wrangler.jsonc` 가 바뀔 때: 시험 → sharktalk 에 올리기 → 로그인 없이 전부 401 인지 확인. 열쇠는 저장소 비밀 `CLOUDFLARE_API_TOKEN`
   - 장부에 쓰는 실행은 `concurrency: ledger` 로 한 번에 하나만 돈다. 올리기는 `.github/commit-data.sh`(자료 저장소로).
   - `exchange`·`order-window` 는 `main` 에 올린 것으로만 돈다(작업 가지에서는 돌지 않는다 — 가지에 자료가 쌓이면 합칠 때 부딪힌다). `probe` 는 어느 가지에서나 돈다.
-- 코드를 고친 뒤에는 시험(임시 폴더)만 이 PC 에서 돌리고, 올리면 클라우드가 실제 장부로 돈다. 장부를 보려면 자료 저장소를 받아 `PAPER_HOME` 으로 주고 `status`·`verify` 만 쓴다(쓰는 명령은 돌리지 않는다).
+- 코드를 고친 뒤에는 시험(임시 폴더)만 이 PC 에서 돌리고, 올리면 클라우드가 실제 장부로 돈다. 장부를 보려면 자료 저장소를 받아 `PAPER_HOME` 으로 주고 `status`·`verify` 를 쓴다.
+  자료 저장소에는 표지 파일 `.ledger-lock` 이 있어, `PAPER_HOME` 으로 가리켜도 쓰는 명령은 거절된다(GitHub 자동 실행만 쓴다 — 2026-11-15 일지 방 지적으로 막음). 표지를 지우지 않는다.
 - GitHub 예약 실행은 늦게 시작될 수 있다. 1분 시세가 8일치뿐이므로 정기 실행이 며칠 멈추면 그 사이 체결은 하루 시세로 어림된다.
 
 ## 구조
