@@ -429,12 +429,80 @@ async function handleAgent(request, env, fetchFn, url) {
   return json({ error: '없는 주소이거나 보내는 방식이 다릅니다' }, 404);
 }
 
+// ---------- 거래소 자체 로그인 (열쇠로) ----------
+// 사람도 그 계좌의 열쇠(pxk_…)로 /login 에서 들어온다. 문지기가 열쇠 지문을 명단과 맞춰 보고
+// 거래소 주소에만 붙는 세션 쿠키(px_session, HttpOnly·Secure·SameSite=Lax, Domain 없음 — sharktalk 다른 서비스와 나누지 않는다)를 준다.
+// 쿠키 = base64url({id, k: 열쇠 지문 앞 16자, exp}).서명 — 서명 열쇠는 GITHUB_TOKEN 에서 끌어낸 HMAC (새 비밀값이 필요 없다).
+// 열쇠를 새로 만들거나 끊으면 지문이 달라져 그 세션도 끝난다. 관리자 = 주인 계좌("main")의 열쇠로 들어온 사람.
+const SESSION = 'px_session';
+const SESSION_DAYS = 30;
+const loginRate = new Map();                             // 보낸 곳(IP) → [시, 횟수]
+const b64u = (bytes) => bytesToB64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+async function sessionKey(env) {
+  const raw = await crypto.subtle.digest('SHA-256', te.encode('px-session:' + (env.GITHUB_TOKEN || '')));
+  return crypto.subtle.importKey('raw', raw, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify']);
+}
+
+export async function makeSession(env, id, keyHash, now = Date.now()) {
+  const body = b64u(te.encode(JSON.stringify({ id, k: keyHash.slice(0, 16), exp: now + SESSION_DAYS * 86400000 })));
+  const sig = new Uint8Array(await crypto.subtle.sign('HMAC', await sessionKey(env), te.encode(body)));
+  return `${body}.${b64u(sig)}`;
+}
+
+/** 쿠키의 세션을 확인한다. 반환 {id, k} 또는 null. */
+export async function readSession(request, env, now = Date.now()) {
+  const m = /(?:^|;\s*)px_session=([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)/.exec(request.headers.get('Cookie') || '');
+  if (!m) return null;
+  try {
+    const ok = await crypto.subtle.verify('HMAC', await sessionKey(env), b64uToBytes(m[2]), te.encode(m[1]));
+    if (!ok) return null;
+    const p = JSON.parse(new TextDecoder().decode(b64uToBytes(m[1])));
+    return p && p.exp > now && typeof p.id === 'string' && typeof p.k === 'string' ? p : null;
+  } catch (e) { return null; }
+}
+
+/** 세션 → 거래소 사람. 열쇠가 바뀌었으면 null. */
+function meFromSession(sess, cfg) {
+  const p = (cfg.players || []).find((x) => accountId(x) === sess.id && validId(accountId(x)));
+  if (!p || !(p.api_keys || []).some((k) => String(k.hash).startsWith(sess.k))) return null;
+  return { email: null, login: null, admin: !!p.main, id: accountId(p), name: p.name || accountId(p), main: !!p.main };
+}
+
+const cookie = (val, maxAge) => `${SESSION}=${val}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}`;
+
+async function handleLogin(request, env, fetchFn, url) {
+  if (url.pathname === '/logout' || url.pathname === '/api/logout') {
+    return new Response(null, { status: 303, headers: { Location: '/login', 'Set-Cookie': cookie('', 0), 'cache-control': 'no-store' } });
+  }
+  // POST /api/login {key}
+  const ip = request.headers.get('CF-Connecting-IP') || 'x';
+  const hour = Math.floor(Date.now() / 3600000);
+  const [h0, n0] = loginRate.get(ip) || [hour, 0];
+  const n = h0 === hour ? n0 + 1 : 1;
+  loginRate.set(ip, [hour, n]);
+  if (n > 20) return json({ error: '시도가 너무 많습니다. 한 시간 뒤에 다시 해 주세요.' }, 429);
+  if (!sameOrigin(request)) return json({ error: '이 화면에서 보낸 요청이 아닙니다' }, 403);
+  const body = await readBody(request);
+  const key = body && typeof body.key === 'string' ? body.key.trim() : '';
+  if (!KEY_RE.test(key)) return json({ error: '열쇠 모양이 아닙니다 (pxk_ 로 시작합니다)' }, 400);
+  let cfg;
+  try { cfg = await loadConfig(env, fetchFn); } catch (e) { return json({ error: '거래소 자료를 읽지 못했습니다' }, 502); }
+  const ag = await agentFromKey(new Request(url, { headers: { Authorization: `Bearer ${key}` } }), cfg);
+  if (!ag) return json({ error: '맞는 열쇠가 아닙니다' }, 401);
+  const sess = await makeSession(env, ag.id, ag.hash);
+  return new Response(JSON.stringify({ ok: true, id: ag.id, name: ag.name }), { status: 200,
+    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'Set-Cookie': cookie(sess, SESSION_DAYS * 86400) } });
+}
+
 /** next: 정적 파일(화면)을 그대로 내주는 함수. */
 export async function handle(request, env, next, fetchFn = fetch) {
   const url = new URL(request.url);
   const path = url.pathname;
   if (path.startsWith('/api/v1/')) return handleAgent(request, env, fetchFn, url);   // 에이전트는 로그인 대신 열쇠
-  if ((path === '/apply' || path === '/apply.html') && request.method === 'GET') {   // 참가 원서 — 로그인 없이 열리는 유일한 화면
+  if (path === '/api/login' && request.method === 'POST') return handleLogin(request, env, fetchFn, url);
+  if (path === '/logout' || path === '/api/logout') return handleLogin(request, env, fetchFn, url);
+  if ((path === '/apply' || path === '/apply.html' || path === '/login' || path === '/login.html') && request.method === 'GET') {   // 참가 원서·로그인 — 로그인 없이 열리는 화면
     const res = await next();
     const headers = new Headers(res.headers);
     headers.set('cache-control', 'no-store');
@@ -442,22 +510,24 @@ export async function handle(request, env, next, fetchFn = fetch) {
     return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
   }
   const api = path.startsWith('/api/') || path.startsWith('/data/');
-  const who = env.AUTH_SVC ? await verifySharktalk(request, env) : await verifyAccess(request, env, fetchFn);
-  if (!who) {
-    // 로그인 화면에 돌아올 주소를 실어 보낸다 (sharktalk-auth 가 ?next= 로 받는다)
-    const back = encodeURIComponent(url.origin + url.pathname);
-    const login = /^https:\/\/[a-z0-9.-]+\/[a-z0-9\/._-]*$/i.test(env.LOGIN_URL || '')
-      ? ` <a style="color:#f2c14e" href="${env.LOGIN_URL}?next=${back}">로그인하러 가기</a>` : '';
-    return api ? json({ error: '로그인이 필요합니다' }, 401) : deny(401, `로그인이 필요합니다.${login}<br>로그인한 뒤 이 주소를 다시 열어 주세요.`);
-  }
+  const sess = await readSession(request, env);
+  // (옮겨 가는 동안만) 거래소 열쇠 세션이 없으면 예전 sharktalk 로그인도 본다 — 주인이 자기 열쇠를 만들 수 있게. 다음 단계에서 걷어 낸다.
+  const who = sess ? null : (env.AUTH_SVC ? await verifySharktalk(request, env) : await verifyAccess(request, env, fetchFn));
+  const needLogin = () => {
+    const back = encodeURIComponent(url.pathname + (url.search || ''));
+    return api ? json({ error: '로그인이 필요합니다' }, 401)
+               : deny(401, `로그인이 필요합니다. <a style="color:#f2c14e" href="/login?next=${back}">열쇠로 들어가기</a>`);
+  };
+  if (!sess && !who) return needLogin();
   let cfg;
   try { cfg = await loadConfig(env, fetchFn); } catch (e) {
     return api ? json({ error: '거래소 자료를 읽지 못했습니다' }, 502) : deny(502, '거래소 자료를 읽지 못했습니다. 잠시 뒤 다시 열어 주세요.');
   }
-  const me = whoami(who, cfg, env);
+  const me = sess ? meFromSession(sess, cfg) : whoami(who, cfg, env);
+  if (!me) return needLogin();                            // 열쇠가 바뀌었거나 끊겼다
   if (!me.admin && me.id === null) {
     return api ? json({ error: '참가자 명단에 없는 계정입니다' }, 403)
-               : deny(403, `${who.email || who.login} 은(는) 참가자 명단에 없습니다. 거래소 주인에게 초대를 요청해 주세요.`);
+               : deny(403, `${(who && (who.email || who.login)) || '이 계정'} 은(는) 참가자 명단에 없습니다. <a style="color:#f2c14e" href="/logout">다른 열쇠로 들어가기</a>`);
   }
 
   if (path === '/api/me') return json({ id: me.id, name: me.name, admin: me.admin, email: me.email });
