@@ -46,7 +46,10 @@ const fetchFn = async (url, init = {}) => {
   }
   return new Response('?', { status: 500 });
 };
-const env = { GITHUB_REPO: 'owner/data', GITHUB_TOKEN: 'tok' };
+const kv = new Map();                                     // 로그인 창고(Cloudflare KV) 흉내
+const env = { GITHUB_REPO: 'owner/data', GITHUB_TOKEN: 'tok',
+              AUTH: { get: async (k) => kv.get(k) ?? null, put: async (k, v) => { kv.set(k, v); }, delete: async (k) => { kv.delete(k); } } };
+const kvJ = (k) => JSON.parse(kv.get(k) || 'null');
 const site = 'https://exchange.sharktalk.co.kr';
 async function call(path, key, { method = 'GET', body, headers = {} } = {}) {
   const h = { ...headers };
@@ -108,8 +111,12 @@ const res = await handle(new Request(site + '/api/admin', { method: 'POST', head
   body: JSON.stringify({ action: 'issue_key', id: 'bob' }) }), env, async () => new Response(''), fetchFn);
 const j = await res.json();
 const adm = puts.find((x) => x.path.startsWith('admin/'));
-check('주인이 열쇠를 만들면 평문은 한 번만 돌려주고, 거래소에는 지문만 간다', res.status === 200 && /^pxk_/.test(j.key) && adm && adm.body.action === 'set_key'
-      && adm.body.id === 'bob' && /^[0-9a-f]{64}$/.test(adm.body.hash) && !JSON.stringify(adm.body).includes(j.key), JSON.stringify({ j, adm }));
+const bobKeys = kvJ('keys:bob') || [];
+check('주인이 열쇠를 만들면 평문은 한 번만, 지문은 로그인 창고에만 (명단에 남은 예전 열쇠는 끊으라고 보낸다)', res.status === 200 && /^pxk_/.test(j.key)
+      && bobKeys.length === 1 && kvJ('key:' + bobKeys[0]).id === 'bob' && ![...kv.values()].join('').includes(j.key)
+      && adm && adm.body.action === 'revoke_key' && adm.body.id === 'bob' && !JSON.stringify(puts).includes(bobKeys[0]), JSON.stringify({ j, puts }));
+check('창고의 새 열쇠로 그 계좌가 열린다', (await call('/api/v1/account', j.key)).status === 200);
+kv.clear();
 
 console.log('참가 신청 (아이디·비밀번호) → 주인 수락 → 그 아이디로 로그인');
 const ap = async (body, headers = {}) => call('/api/v1/apply', null, { method: 'POST', body, headers: { 'CF-Connecting-IP': '1.2.3.4', ...headers } });
@@ -120,11 +127,13 @@ check('아이디가 없거나 비밀번호가 짧으면 받지 않는다', (awai
 check('이미 쓰이는 아이디(계좌 이름표)는 받지 않는다', (await ap({ real_name: '김철수', name: '돌쇠', id: 'bob', password: 'secret-123' })).status === 409);
 r = await ap({ real_name: '김철수', name: '돌쇠', agent: '돌쇠봇', id: 'dolsoe', password: 'secret-123', message: '잘 부탁합니다', status: 'approved' });
 const appRec = puts[0]?.body;
-check('신청은 applications/pending/ 에, 비밀번호는 PBKDF2 지문만', r.status === 202 && /^ap-\d{17}-[0-9a-f]{8}$/.test(r.data.application)
-      && puts[0].path === `applications/pending/${r.data.application}.json` && appRec.real_name === '김철수' && appRec.want_id === 'dolsoe'
-      && appRec.status === 'pending' && /^pbkdf2\$100000\$/.test(appRec.password) && !JSON.stringify(appRec).includes('secret-123') && !r.data.claim, JSON.stringify(puts));
 const appId = r.data.application;
-check('비밀번호 지문 확인', await checkPassword('secret-123', appRec.password) && !(await checkPassword('secret-124', appRec.password)));
+const pwRec = kvJ('pw:dolsoe');
+check('신청은 applications/pending/ 에 (비밀번호 없이), 비밀번호 지문은 로그인 창고에만', r.status === 202 && /^ap-\d{17}-[0-9a-f]{8}$/.test(appId)
+      && puts[0].path === `applications/pending/${appId}.json` && appRec.real_name === '김철수' && appRec.want_id === 'dolsoe'
+      && appRec.status === 'pending' && !('password' in appRec) && !JSON.stringify(puts).includes('pbkdf2') && !JSON.stringify(puts).includes('secret-123')
+      && pwRec && /^pbkdf2\$100000\$/.test(pwRec.hash) && pwRec.pending === appId && !r.data.claim, JSON.stringify({ puts, pwRec }));
+check('비밀번호 지문 확인', await checkPassword('secret-123', pwRec.hash) && !(await checkPassword('secret-124', pwRec.hash)));
 files[`applications/pending/${appId}.json`] = appRec;
 { const rr = await ap({ real_name: '최둘', name: '둘', id: 'dolsoe', password: 'secret-123' }, { 'CF-Connecting-IP': '1.2.3.5' }); check('기다리는 원서와 같은 아이디도 받지 않는다', rr.status === 409, JSON.stringify(rr)); }
 check('예전 찾아가기 주소는 없다', (await call(`/api/v1/apply/${appId}`, 'pxc_' + 'A'.repeat(40))).status === 404);
@@ -134,7 +143,7 @@ let pr = await pwLogin('dolsoe', 'secret-123');
 check('수락 전에 들어오면 "아직 수락 전" (비밀번호가 맞을 때만)', pr.status === 403 && /수락/.test((await pr.json()).error)
       && (await pwLogin('dolsoe', 'wrong-pass')).status === 401);
 delete files[`applications/pending/${appId}.json`];
-players.players.push({ id: 'dolsoe', name: '돌쇠', password: appRec.password });     // 거래소가 수락하면 명단에 지문이 옮겨진다
+players.players.push({ id: 'dolsoe', name: '돌쇠', application: appId });     // 거래소가 수락하면 그 원서로 계좌가 열린다
 _resetCaches();
 pr = await pwLogin('DolSoe', 'secret-123');
 const pc = (pr.headers.get('set-cookie') || '').split(';')[0];
@@ -147,26 +156,32 @@ const mine = async (path, body) => { puts = []; const res = await handle(new Req
   headers: { Cookie: pc, Origin: site, 'content-type': 'application/json' }, body: JSON.stringify(body || {}) }), env, async () => new Response(''), fetchFn);
   return { status: res.status, data: await res.json() }; };
 let mr = await mine('/api/key');
-const sk = puts.find((x) => x.path.startsWith('admin/'));
-check('내 설정: 에이전트 열쇠를 스스로 만든다 (평문은 한 번만, 거래소에는 지문만)', mr.status === 200 && /^pxk_/.test(mr.data.key) && mr.data.account === 'dolsoe'
-      && sk && sk.body.action === 'set_key' && sk.body.id === 'dolsoe' && !JSON.stringify(sk.body).includes(mr.data.key), JSON.stringify(mr));
+const dk = kvJ('keys:dolsoe') || [];
+check('내 설정: 에이전트 열쇠를 스스로 만든다 (평문은 한 번만, 지문은 창고에만, 저장소에는 아무것도 안 감)', mr.status === 200 && /^pxk_/.test(mr.data.key)
+      && mr.data.account === 'dolsoe' && dk.length === 1 && puts.length === 0 && (await call('/api/v1/account', mr.data.key)).status !== 401, JSON.stringify(mr));
+const firstKey = mr.data.key;
+mr = await mine('/api/key');
+check('열쇠를 다시 만들면 예전 열쇠는 끊긴다', (await call('/api/v1/account', firstKey)).status === 401 && (kvJ('keys:dolsoe') || []).length === 1);
 check('내 설정: 지금 비밀번호가 틀리면 못 바꾼다', (await mine('/api/password', { current: 'nope-nope', password: 'newpass-1' })).status === 403);
-mr = await mine('/api/password', { current: 'secret-123', password: 'newpass-1' });
-const sp = puts.find((x) => x.path.startsWith('admin/'));
-check('내 설정: 비밀번호 바꾸기 → set_password (지문만), 다시 들어오라고 알린다', mr.status === 200 && mr.data.relogin === true && sp.body.action === 'set_password'
-      && sp.body.id === 'dolsoe' && await checkPassword('newpass-1', sp.body.password) && !JSON.stringify(sp.body).includes('newpass-1'), JSON.stringify(sp));
-players.players[players.players.length - 1].password = sp.body.password;
-_resetCaches();
+const pwRes = await handle(new Request(site + '/api/password', { method: 'POST', headers: { Cookie: pc, Origin: site, 'content-type': 'application/json' },
+  body: JSON.stringify({ current: 'secret-123', password: 'newpass-1' }) }), env, async () => new Response(''), fetchFn);
+const pc2 = (pwRes.headers.get('set-cookie') || '').split(';')[0];
+check('내 설정: 비밀번호 바꾸기 → 창고에 지문만, 저장소에는 아무것도 안 가고, 새 세션을 바로 준다', pwRes.status === 200 && await checkPassword('newpass-1', kvJ('pw:dolsoe').hash)
+      && !kvJ('pw:dolsoe').pending && puts.length === 0 && /^px_session=/.test(pc2));
 const me2 = await handle(new Request(site + '/api/me', { headers: { Cookie: pc } }), env, async () => new Response(''), fetchFn);
-check('비밀번호가 바뀌면 예전 세션은 끝난다', me2.status === 401);
+const me3 = await handle(new Request(site + '/api/me', { headers: { Cookie: pc2 } }), env, async () => new Response(''), fetchFn);
+check('비밀번호가 바뀌면 예전 세션은 끝나고 새 세션은 그대로', me2.status === 401 && me3.status === 200);
+check('새 비밀번호로 들어온다', (await pwLogin('dolsoe', 'newpass-1')).status === 200 && (await pwLogin('dolsoe', 'secret-123')).status === 401);
 puts = [];
 const bossC = 'px_session=' + await makeSession(env, 'boss', kb.hash);
 const rp = await handle(new Request(site + '/api/admin', { method: 'POST', headers: { Cookie: bossC, Origin: site, 'content-type': 'application/json' },
   body: JSON.stringify({ action: 'reset_password', id: 'dolsoe' }) }), env, async () => new Response(''), fetchFn);
 const rpj = await rp.json();
-const rpa = puts.find((x) => x.path.startsWith('admin/'));
-check('주인: 임시 비밀번호를 만들어 한 번만 보여 주고, 거래소에는 지문만', rp.status === 200 && /^[a-z2-9]{5}-[a-z2-9]{5}$/.test(rpj.password)
-      && rpa.body.action === 'set_password' && await checkPassword(rpj.password, rpa.body.password), JSON.stringify(rpj));
+check('주인: 임시 비밀번호를 만들어 한 번만 보여 주고, 지문은 창고에만', rp.status === 200 && /^[a-z2-9]{5}-[a-z2-9]{5}$/.test(rpj.password)
+      && puts.length === 0 && await checkPassword(rpj.password, kvJ('pw:dolsoe').hash) && (await pwLogin('dolsoe', rpj.password)).status === 200, JSON.stringify(rpj));
+check('원서 시절 비밀번호는 그 원서로 열린 계좌에만 맞는다', await (async () => {
+  kv.set('pw:zed', JSON.stringify({ hash: kvJ('pw:dolsoe').hash, pending: 'ap-x' })); players.players.push({ id: 'zed', name: 'z' }); _resetCaches();
+  const st = (await pwLogin('zed', rpj.password)).status; players.players.pop(); _resetCaches(); return st === 401; })());
 const raw = await handle(new Request(site + '/api/admin', { method: 'POST', headers: { Cookie: bossC, Origin: site, 'content-type': 'application/json' },
   body: JSON.stringify({ action: 'set_password', id: 'dolsoe', password: 'pbkdf2$1$x$y' }) }), env, async () => new Response(''), fetchFn);
 check('주인도 set_password 를 직접 보내지는 못한다', raw.status === 400);
