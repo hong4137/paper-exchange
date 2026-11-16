@@ -196,7 +196,7 @@ const ADMIN_ACTIONS = { add_player: ['id', 'github', 'email', 'login', 'name', '
                         add_contest: ['name', 'start', 'end'], remove_contest: ['name'],
                         approve_fork: ['account', 'fork'], reject_fork: ['account', 'fork', 'why'],
                         set_key: ['id', 'hash', 'label'], revoke_key: ['id'],
-                        approve_application: ['id', 'account'], reject_application: ['id', 'why'] };
+                        approve_application: ['id', 'account'], reject_application: ['id', 'why'], clear_login: ['id'] };
 
 /** 관리 명령을 자료 저장소의 admin/ 에 요청 파일로 올린다 (관리자만 부른다 — handle 이 확인한다). */
 export async function submitAdmin(body, env, fetchFn = fetch, now = new Date()) {

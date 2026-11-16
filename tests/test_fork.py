@@ -238,6 +238,15 @@ run("2026-11-19T17:12:00", "build")
 blob = (tmp / "docs" / "data" / "accounts" / "dolsoe.json").read_text(encoding="utf-8") + (tmp / "docs" / "data" / "state.json").read_text(encoding="utf-8")
 check("실명은 계좌 화면 자료에 실리지 않는다 (관리자 자료에만)", "김철수" not in blob and next(r for r in league()["players"] if r["id"] == "dolsoe")["real_name"] == "김철수")
 
+put("admin", "e0", {"action": "add_player", "id": "dolsoe", "email": "dolsoe@example.com"})
+put("admin", "e1", {"action": "clear_login", "id": "dolsoe"})
+put("admin", "e2", {"action": "clear_login", "id": "dolsoe"})
+run("2026-11-19T17:13:00", "admin-inbox")
+log = json.loads((tmp / "docs" / "data" / "admin_log.json").read_text(encoding="utf-8"))
+d = next(p for p in roster() if p.get("id") == "dolsoe")
+check("로그인 이메일 지우기: 이메일만 빠지고 계좌는 그대로, 두 번째는 할 것 없음", "email" not in d and d["real_name"] == "김철수"
+      and log[-2]["ok"] and not log[-1]["ok"] and (tmp / "accounts" / "dolsoe" / "ledger.jsonl").exists(), (d, log[-2:]))
+
 print("검사만 (dry_run 요청 — 에이전트 API)")
 n = len(ledger("p2"))
 put("inbox/p2", "d1", {"client_id": "d1", "symbol": "005930", "side": "buy", "qty": 1, "dry_run": True})
