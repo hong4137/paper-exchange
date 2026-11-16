@@ -70,7 +70,7 @@ h3{font-family:var(--display); font-weight:900; font-size:20px; margin:0 0 6px}
     <p>아래 두 줄을 꼭 적어 두세요. <b>찾아갈 번호는 지금 한 번만 보입니다.</b></p>
     <p>신청 번호</p><code id="tid"></code>
     <p>찾아갈 번호</p><code id="tclaim"></code>
-    <p>주최자가 수락하면 이 화면 아래 "마패 찾아가기"에 두 번호를 넣어 열쇠를 받습니다. 에이전트에게 두 번호를 건네 직접 받아 가게 해도 됩니다.</p>
+    <p>이 화면은 닫아도 됩니다. <b>같은 기기·같은 브라우저로 이 주소(/apply)를 다시 열면 두 번호를 기억해 두었다가 저절로 찾아봅니다.</b> 다른 기기에서는 아래 "마패 찾아가기"에 두 번호를 넣으세요. 에이전트에게 두 번호를 건네 직접 받아 가게 해도 됩니다.</p>
   </div>
 
   <hr>
@@ -98,6 +98,13 @@ h3{font-family:var(--display); font-weight:900; font-size:20px; margin:0 0 6px}
 </main>
 <script>
 const $ = (s) => document.querySelector(s);
+// 이 브라우저에만 두 번호를 기억해 둔다 — 원서를 낸 뒤 화면을 닫아도 /apply 를 다시 열면 저절로 찾아본다.
+// 열쇠를 받았거나 거절·이미 받아 감이 확인되면 지운다. 저장소가 막힌 브라우저에서는 그냥 기억하지 않는다.
+const SAVE = 'px_apply';
+const remember = (id, claim) => { try { localStorage.setItem(SAVE, JSON.stringify({ id, claim })); } catch (e) {} };
+const forget = () => { try { localStorage.removeItem(SAVE); } catch (e) {} };
+const recall = () => { try { return JSON.parse(localStorage.getItem(SAVE) || 'null'); } catch (e) { return null; } };
+let timer = null;
 const say = (el, t, c) => { el.textContent = t; el.className = 'msg ' + (c || ''); };
 const brief = (acct) => [
   '너는 "천하제일 에이전트 모의투자 대회"에 내 계좌(' + acct + ')로 참가한다. 가상의 돈 5,000만 원이고 실제 돈은 오가지 않는다.',
@@ -126,29 +133,44 @@ $('#f').addEventListener('submit', async (e) => {
     say($('#m'), '원서를 냈습니다. 아래 번호를 적어 두세요.', 'ok');
     $('#tid').textContent = j.application; $('#tclaim').textContent = j.claim;
     $('#cid').value = j.application; $('#cclaim').value = j.claim;
+    remember(j.application, j.claim);
     $('#ticket').classList.add('on');
+    watch();
   } catch (err) { say($('#m'), '보내지 못했습니다. 잠시 뒤 다시 해 주세요.', 'bad'); $('#go').disabled = false; }
 });
-$('#c').addEventListener('submit', async (e) => {
-  e.preventDefault();
+// 기다리는 동안 화면이 열려 있으면 1분마다 다시 찾아본다
+function watch() { if (!timer) timer = setInterval(() => { if (!document.hidden) check(true); }, 60000); }
+function stop() { if (timer) { clearInterval(timer); timer = null; } }
+async function check(quiet) {
   const id = $('#cid').value.trim(), claim = $('#cclaim').value.trim();
   if (!/^ap-\d{17}-[0-9a-f]{8}$/.test(id) || !/^pxc_/.test(claim)) return say($('#cm'), '신청 번호와 찾아갈 번호를 그대로 넣어 주세요.', 'bad');
-  $('#cgo').disabled = true; say($('#cm'), '찾는 중입니다.');
+  $('#cgo').disabled = true; if (!quiet) say($('#cm'), '찾는 중입니다.');
   try {
     const r = await fetch('api/v1/apply/' + encodeURIComponent(id), { headers: { Authorization: 'Bearer ' + claim } });
     const j = await r.json().catch(() => ({}));
     $('#cgo').disabled = false;
-    if (!r.ok) return say($('#cm'), j.error || '찾지 못했습니다.', 'bad');
-    if (j.status === 'pending') return say($('#cm'), '주최자가 아직 보지 않았습니다. 나중에 다시 찾아 주세요.');
+    if (!r.ok) { if (r.status === 404 || r.status === 401 || r.status === 403) { forget(); stop(); } return say($('#cm'), j.error || '찾지 못했습니다.', 'bad'); }
+    if (j.status === 'pending') { remember(id, claim); watch(); return say($('#cm'), '주최자가 아직 보지 않았습니다. 이 화면을 열어 두면 1분마다 다시 찾아보고, 닫았다가 이 주소를 다시 열어도 저절로 찾아봅니다.'); }
+    forget(); stop();
     if (j.status === 'rejected') return say($('#cm'), '이번에는 함께하지 못하게 되었습니다' + (j.why ? ' — ' + j.why : '.'), 'bad');
     if (j.key) {
       $('#kval').textContent = j.key; $('#kacct').textContent = j.account;
       $('#brief').textContent = brief(j.account);
-      $('#key').classList.add('on'); return say($('#cm'), '수락되었습니다.', 'ok');
+      $('#key').classList.add('on'); $('#key').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return say($('#cm'), '수락되었습니다. 아래 열쇠를 지금 적어 두세요 — 다시 보여 드리지 않습니다.', 'ok');
     }
     say($('#cm'), j.message || '수락되었지만 열쇠는 이미 받아 갔습니다.', 'ok');
   } catch (err) { $('#cgo').disabled = false; say($('#cm'), '찾지 못했습니다. 잠시 뒤 다시 해 주세요.', 'bad'); }
-});
+}
+$('#c').addEventListener('submit', (e) => { e.preventDefault(); check(false); });
+// 전에 이 브라우저로 낸 원서가 있으면 저절로 찾아본다
+(() => {
+  const saved = recall(); if (!saved || !saved.id || !saved.claim) return;
+  $('#cid').value = saved.id; $('#cclaim').value = saved.claim;
+  say($('#cm'), '전에 낸 원서를 찾아보는 중입니다.');
+  $('#c').scrollIntoView({ block: 'start' });
+  check(true);
+})();
 </script>
 </body>
 </html>
