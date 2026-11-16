@@ -233,6 +233,7 @@ async function manage(){
     </div><div class="row" style="margin-top:8px">
       <button type="submit" data-a="issue_key" style="background:transparent;color:var(--txt);border:1px solid var(--line)">에이전트 열쇠 만들기</button>
       <button type="submit" data-a="revoke_key" style="background:transparent;color:var(--dim);border:1px solid var(--line)">열쇠 끊기</button>
+      <button type="submit" data-a="clear_login" style="background:transparent;color:var(--dim);border:1px solid var(--line)">로그인 이메일 지우기</button>
       <span class="who" style="align-self:center">에이전트가 화면 없이 직접 주문하는 열쇠입니다. 이름표 칸만 적으면 됩니다. 새로 만들면 예전 열쇠는 끊깁니다.</span>
     </div><p class="msg" id="am"></p><div id="akey"></div></form><div id="alog"></div></section>`;
   adminLog();
@@ -242,6 +243,10 @@ async function manage(){
     e.preventDefault();
     const v=n=>f.elements[n].value.trim(), msg=$('#am'), say=(t,c)=>{msg.textContent=t; msg.className='msg '+(c||'');};
     if(!v('id')) return say('이름표를 적어 주세요.','bad');
+    if(act==='clear_login'){
+      if(!confirm(v('id')+' 의 로그인 이메일을 명단에서 뺄까요? 계좌와 장부는 그대로입니다.')) return;
+      say('보내는 중입니다.'); const r=await post('api/admin',{action:act,id:v('id')}); say(r.text,r.ok?'ok':'bad'); if(r.ok) setTimeout(adminLog,90*1000); return;
+    }
     if(act==='issue_key'||act==='revoke_key'){
       if(!confirm(v('id')+(act==='issue_key'?' 의 에이전트 열쇠를 새로 만들까요? 예전 열쇠는 끊깁니다.':' 의 에이전트 열쇠를 끊을까요?'))) return;
       say('보내는 중입니다.');

@@ -1857,6 +1857,16 @@ def admin_do(cfg, req):
         else:
             cs.append(new)
         return f"'{name}' 대회를 {start} ~ {end or '끝 없음'} 으로 정했습니다"
+    if act == "clear_login":                           # 사람의 로그인 이메일·아이디를 명단에서 뺀다 (계좌·장부·열쇠는 그대로)
+        pid = str(req.get("id") or "").strip().lower()
+        cur = next((p for p in cfg.get("players") or [] if str(p.get("id") or p.get("github") or "").lower() == pid), None)
+        if not cur:
+            raise Refused(f"`{pid}` 은(는) 명단에 없습니다")
+        if not (cur.get("email") or cur.get("login")):
+            raise Refused(f"`{pid}` 에는 로그인 이메일이 없습니다")
+        cur.pop("email", None)
+        cur.pop("login", None)
+        return f"`{pid}` 의 로그인 이메일을 뺐습니다. 이제 그 이메일로 로그인해도 거래소 화면에 들어오지 못합니다 (계좌·장부는 그대로)"
     if act in ("approve_application", "reject_application"):   # 참가 신청 (문지기의 /api/v1/apply 가 applications/pending/ 에 둔다)
         aid = str(req.get("id") or "")
         if not re.fullmatch(r"ap-[0-9]{17}-[0-9a-f]{8}", aid):
@@ -1901,7 +1911,7 @@ def admin_do(cfg, req):
             raise Refused("열쇠 지문이 올바르지 않습니다")
         cur["api_keys"] = [{"hash": h, "created": now().isoformat(timespec="seconds"), "label": str(req.get("label") or "")[:40]}]
         return f"`{pid}` 의 에이전트 열쇠를 새로 달았습니다 (예전 열쇠는 끊김)"
-    raise Refused("모르는 관리 명령입니다 (add_player · remove_player · add_contest · remove_contest · set_key · revoke_key · approve_application · reject_application)")
+    raise Refused("모르는 관리 명령입니다 (add_player · remove_player · add_contest · remove_contest · set_key · revoke_key · approve_application · reject_application · clear_login)")
 
 
 def cmd_admin_issue(author, body):
