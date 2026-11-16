@@ -222,7 +222,8 @@ async function whoAmI(){
 async function manage(){
   const me=await whoAmI();
   if(!me||!me.admin) return;
-  $('#manage').innerHTML=`<section><h2>참가자 관리</h2><p class="sub">넣으면 계좌가 같은 시작 금액으로 열립니다. 이름표는 계좌를 가리키는 짧은 영문 이름입니다. 보통은 참가 원서를 수락하면 됩니다(신청한 사람이 정한 아이디·비밀번호로 바로 들어옵니다). 여기서 직접 넣었으면 "비밀번호 새로 만들기"로 임시 비밀번호를 건네세요 — 아이디는 이름표입니다. 이미 있는 이름표를 다시 넣으면 화면 이름 등을 고칩니다. 1~2분 뒤 아래 표에 반영됩니다.</p>
+  $('#manage').innerHTML=`<section><h2>참가자 관리</h2><div id="members"><p class="who">회원 목록을 불러오는 중입니다.</p></div>
+    <h3 class="ct" style="margin-top:18px">직접 넣기 · 고치기</h3><p class="sub">넣으면 계좌가 같은 시작 금액으로 열립니다. 이름표는 계좌를 가리키는 짧은 영문 이름입니다. 보통은 참가 원서를 수락하면 됩니다(신청한 사람이 정한 아이디·비밀번호로 바로 들어옵니다). 여기서 직접 넣었으면 "비밀번호 새로 만들기"로 임시 비밀번호를 건네세요 — 아이디는 이름표입니다. 이미 있는 이름표를 다시 넣으면 화면 이름 등을 고칩니다. 1~2분 뒤 아래 표에 반영됩니다.</p>
     <form class="form" id="af"><div class="row">
       <label>이름표 (영문·숫자)<input name="id" placeholder="alice" autocomplete="off"></label>
       <label>화면에 나올 이름<input name="name" autocomplete="off"></label>
@@ -240,6 +241,7 @@ async function manage(){
   adminLog();
   const f=$('#af'); let act='add_player';
   f.querySelectorAll('button').forEach(b=>b.onclick=()=>{act=b.dataset.a;});
+  members(f, a=>{act=a;});
   f.onsubmit=async e=>{
     e.preventDefault();
     const v=n=>f.elements[n].value.trim(), msg=$('#am'), say=(t,c)=>{msg.textContent=t; msg.className='msg '+(c||'');};
@@ -274,6 +276,30 @@ async function manage(){
     const r=await post('api/admin',act==='add_player'?{action:act,id:v('id'),...who,name:v('name'),agent:v('agent')}:{action:act,id:v('id')});
     say(r.text,r.ok?'ok':'bad'); if(r.ok){ f.reset(); setTimeout(()=>{load(); adminLog();},90*1000); }
   };
+}
+// 회원 목록 — 줄마다 버튼. 누르면 아래 양식에 이름표를 채워 같은 일을 한다 (이름표를 손으로 칠 필요가 없게)
+async function members(f, setAct){
+  const box=$('#members'); if(!box) return;
+  let list=[];
+  try{ const r=await fetch('api/members',{cache:'no-store'}); if(r.ok) list=(await r.json()).members||[]; }catch(e){}
+  if(!list.length){ box.innerHTML='<p class="who">회원 목록을 불러오지 못했습니다.</p>'; return; }
+  const yes=(b,t,n)=>b?`<b>${t}</b>`:`<span class="who">${n}</span>`;
+  const btn=(a,id,t,dim)=>`<button type="button" class="btn mb" data-a="${a}" data-id="${esc(id)}" style="background:transparent;color:var(${dim?'--dim':'--txt'});border:1px solid var(--line);padding:4px 10px;font-size:12.5px">${t}</button>`;
+  box.innerHTML=`<div class="tblwrap"><table><thead><tr><th>이름</th><th>아이디(이름표)</th><th class="c3">실명</th><th>비밀번호</th><th>에이전트 열쇠</th><th></th></tr></thead><tbody>
+    ${list.map(m=>`<tr><td>${esc(m.name)}${m.main?' <span class="who">· 주인</span>':''}${m.agent?` <span class="who">· ${esc(m.agent)}</span>`:''}</td>
+      <td class="num">${esc(m.id)}</td><td class="c3">${esc(m.real_name||'')}</td>
+      <td>${yes(m.has_password,'있음','없음')}</td><td>${yes(m.has_key,'있음','없음')}</td>
+      <td style="white-space:nowrap">${btn('reset_password',m.id,'비밀번호 새로')} ${btn('issue_key',m.id,'열쇠 만들기')} ${m.has_key?btn('revoke_key',m.id,'열쇠 끊기',1):''}
+        ${btn('edit',m.id,'고치기',1)} ${m.main?'':btn('remove_player',m.id,'빼기',1)}</td></tr>`).join('')}
+  </tbody></table></div>`;
+  box.querySelectorAll('.mb').forEach(b=>b.onclick=()=>{
+    const m=list.find(x=>x.id===b.dataset.id); if(!m) return;
+    f.elements.id.value=m.id;
+    if(b.dataset.a==='edit'){ f.elements.name.value=m.name; f.elements.agent.value=m.agent; setAct('add_player'); f.elements.name.focus(); return; }
+    setAct(b.dataset.a); f.requestSubmit();
+    $('#am').scrollIntoView({behavior:'smooth',block:'center'});
+    setTimeout(()=>members(f,setAct),3000);
+  });
 }
 // 관리 요청의 결과 — 거래소가 처리한 뒤 남긴 기록 (최근 것부터)
 async function adminLog(){
