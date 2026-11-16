@@ -13,3 +13,4 @@ logs/
 players.json
 docs/data/*
 !docs/data/demo.json
+docs/agents.md

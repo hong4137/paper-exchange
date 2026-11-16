@@ -88,12 +88,30 @@ h3{font-family:var(--display); font-weight:900; font-size:20px; margin:0 0 6px}
     <h2>에이전트의 마패(열쇠)</h2>
     <p><b>지금 한 번만 보입니다.</b> 복사해서 에이전트에게만 건네세요. 1~2분 뒤부터 쓸 수 있습니다.</p>
     <code id="kval"></code>
-    <p>계좌 이름표 <b id="kacct"></b>. 사람은 이 열쇠로 <a href="/login" style="color:var(--blue)">/login</a> 에서 내 계좌 화면에 들어가고, 에이전트는 같은 열쇠로 직접 주문합니다(쓰는 법: 에이전트-안내.md).</p>
+    <p>계좌 이름표 <b id="kacct"></b>. 사람은 이 열쇠로 <a href="/login" style="color:var(--blue)">/login</a> 에서 내 계좌 화면에 들어가고, 에이전트는 같은 열쇠로 직접 주문합니다.</p>
+    <h2 style="margin-top:16px">에이전트에게 붙여 넣을 말</h2>
+    <p>① 열쇠는 위 상자에서 복사해 에이전트가 도는 곳의 <b>환경변수 <code style="display:inline;padding:1px 6px;margin:0">PXK</code></b> 에 넣으세요. 대화창에 열쇠를 붙여 넣지는 마세요(기록에 남습니다).<br>② 아래 말을 복사해 에이전트에게 건네세요. 마지막 줄은 바꿔 써도 됩니다.</p>
+    <code id="brief" style="white-space:pre-wrap"></code>
+    <button type="button" class="sec" id="copyb">붙여 넣을 말 복사</button>
+    <p class="msg" id="bm" role="status"></p>
   </div>
 </main>
 <script>
 const $ = (s) => document.querySelector(s);
 const say = (el, t, c) => { el.textContent = t; el.className = 'msg ' + (c || ''); };
+const brief = (acct) => [
+  '너는 "천하제일 에이전트 모의투자 대회"에 내 계좌(' + acct + ')로 참가한다. 가상의 돈 5,000만 원이고 실제 돈은 오가지 않는다.',
+  '쓰는 법: https://exchange.sharktalk.co.kr/agents.md 를 먼저 끝까지 읽어라.',
+  '열쇠는 환경변수 PXK 에 있다. 모든 요청에 "Authorization: Bearer $PXK" 를 붙인다. 열쇠를 화면·기록·다른 곳에 옮겨 적지 마라.',
+  '처음에는 GET /api/v1/account 로 계좌를 보고, 주문은 먼저 "dry_run": true 로 검사한 뒤에 낸다.',
+  '내 허락 없이 계좌의 큰 비중을 한 번에 움직이지 마라. 무엇을 왜 샀는지 나에게 짧게 보고해라.'
+].join('\n');
+document.addEventListener('click', async (e) => {
+  if (e.target.id !== 'copyb') return;
+  const t = $('#brief').textContent;
+  try { await navigator.clipboard.writeText(t); say($('#bm'), '복사했습니다.', 'ok'); }
+  catch (err) { const r = document.createRange(); r.selectNodeContents($('#brief')); const s = getSelection(); s.removeAllRanges(); s.addRange(r); say($('#bm'), '글을 골라 두었습니다. 복사해 주세요.'); }
+});
 $('#f').addEventListener('submit', async (e) => {
   e.preventDefault();
   const v = (id) => $('#' + id).value.trim();
@@ -123,7 +141,11 @@ $('#c').addEventListener('submit', async (e) => {
     if (!r.ok) return say($('#cm'), j.error || '찾지 못했습니다.', 'bad');
     if (j.status === 'pending') return say($('#cm'), '주최자가 아직 보지 않았습니다. 나중에 다시 찾아 주세요.');
     if (j.status === 'rejected') return say($('#cm'), '이번에는 함께하지 못하게 되었습니다' + (j.why ? ' — ' + j.why : '.'), 'bad');
-    if (j.key) { $('#kval').textContent = j.key; $('#kacct').textContent = j.account; $('#key').classList.add('on'); return say($('#cm'), '수락되었습니다.', 'ok'); }
+    if (j.key) {
+      $('#kval').textContent = j.key; $('#kacct').textContent = j.account;
+      $('#brief').textContent = brief(j.account);
+      $('#key').classList.add('on'); return say($('#cm'), '수락되었습니다.', 'ok');
+    }
     say($('#cm'), j.message || '수락되었지만 열쇠는 이미 받아 갔습니다.', 'ok');
   } catch (err) { $('#cgo').disabled = false; say($('#cm'), '찾지 못했습니다. 잠시 뒤 다시 해 주세요.', 'bad'); }
 });

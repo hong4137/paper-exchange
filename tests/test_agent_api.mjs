@@ -181,6 +181,10 @@ check('로그인 화면은 로그인 없이 열린다', (await call('/login')).s
 r = await call('/index.html');
 check('로그인 안 했으면 401 과 함께 열쇠로 들어가는 길', r.status === 401 && /\/login\?next=/.test(String(r.data)), String(r.data).slice(0, 200));
 
+const ag = await handle(new Request(site + '/agents.md'), env, async () => new Response('# 안내'), fetchFn);
+check('에이전트 안내(/agents.md)는 로그인 없이 마크다운으로, /agents 는 그리로', ag.status === 200 && /text\/markdown/.test(ag.headers.get('content-type'))
+      && (await handle(new Request(site + '/agents'), env, async () => new Response(''), fetchFn)).headers.get('location') === '/agents.md');
+
 console.log('요청 횟수 막이');
 let last;
 for (let i = 0; i < 61; i++) last = await call('/api/v1/account', k2.key);

@@ -168,7 +168,8 @@ retired/              (엔진) 쓰지 않게 된 이슈 창구·이슈 양식·�
 - 진짜 막힘이다: 열쇠로는 자기 계좌와 시장 정보 말고 아무것도 열리지 않는다. 그래서 형제 가리기도 이 길로 옮기면 "약속"이 아니라 잠금이 된다.
 - **참가 신청 → 주인 수락**(사용자 결정 2026-11-15: "내가 수락해 주는 방식으로. 신청 양식에 주인의 실명을 넣을 것" — 신청하는 사람의 실명, 필수):
   `POST /api/v1/apply`(열쇠 없이) `{real_name, name, agent, id(바라는 이름표), message}` → 자료 저장소 `applications/pending/{ap-…}.json`(찾아갈 번호 `pxc_…` 는 sha256 지문만), 답 202 `{application, claim}` — claim 은 한 번만.
-  사람용 화면은 `docs/apply.html`(`/apply` — 로그인 없이 열리는 화면은 이것과 `/login` 뿐). 한 곳(IP)에서 한 시간 5번, 기다리는 원서 20건까지(워커 안에서 대략).
+  사람용 화면은 `docs/apply.html`(`/apply`). 로그인 없이 열리는 것은 `/apply`·`/login`·`/agents.md`(에이전트 안내 — 원본 `에이전트-안내.md` 를 site-deploy 가 `docs/agents.md` 로 복사해 올린다, 저장소에는 올리지 않음).
+  원서 화면은 열쇠를 내줄 때 "에이전트에게 붙여 넣을 말"(안내 주소·열쇠는 환경변수 PXK·dry_run 먼저)을 복사 버튼과 함께 보여 준다(사용자 2026-11-16). 한 곳(IP)에서 한 시간 5번, 기다리는 원서 20건까지(워커 안에서 대략).
   관리자 화면 "참가 신청"에서 수락·거절 → `admin/` `{"action": "approve_application" | "reject_application", "id", "account"?, "why"?}` → 엔진이 명단에 `{id, name, agent, email, real_name, application}` 을 넣고(바라는 이름표가 없거나 쓰이고 있으면 `f{번호}`) 원서를 `applications/done/` 으로 옮긴다.
   `GET /api/v1/apply/{id}` + `Bearer pxc_…` → pending / rejected(why) / approved: **처음 한 번만** 문지기가 열쇠를 만들어 내주고 지문을 `set_key` 로 보낸다(원서에 `claimed_at`). 두 번째부터는 다시 주지 않는다 — 잃으면 주인이 관리자 화면에서 새로 만든다.
   **실명은 관리자 자료(league.json `players[].real_name`·`applications`)에만** — 계좌 화면 자료·state.json 에는 싣지 않는다. 원서는 지우지 않고 done 에 쌓인다(나중에 정리할 일).
