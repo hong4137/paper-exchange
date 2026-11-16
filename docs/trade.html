@@ -285,7 +285,7 @@ async function post(path, body){
   }catch(e){ return {ok:false, text:'보내지 못했습니다. 잠시 뒤 다시 해 주세요.'}; }
 }
 function tabs(){
-  $('#tabs').innerHTML=`<a href="index.html">내 계좌</a><a class="on" href="trade.html">주문</a>${ME&&ME.admin?'<a href="admin.html">관리자 화면</a>':''}<a href="/logout">나가기</a>`;
+  $('#tabs').innerHTML=`<a href="index.html">내 계좌</a><a class="on" href="trade.html">주문</a><a href="me.html">내 설정</a>${ME&&ME.admin?'<a href="admin.html">관리자 화면</a>':''}<a href="/logout">나가기</a>`;
 }
 function spark(v,w,h,base){
   if(!v||v.length<2) return '';

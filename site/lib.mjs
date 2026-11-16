@@ -109,7 +109,7 @@ export async function submitOrder(body, me, env, fetchFn = fetch, now = new Date
 const ADMIN_ACTIONS = { add_player: ['id', 'github', 'email', 'login', 'name', 'agent'], remove_player: ['id', 'github'],
                         add_contest: ['name', 'start', 'end'], remove_contest: ['name'],
                         approve_fork: ['account', 'fork'], reject_fork: ['account', 'fork', 'why'],
-                        set_key: ['id', 'hash', 'label'], revoke_key: ['id'],
+                        set_key: ['id', 'hash', 'label'], revoke_key: ['id'], set_password: ['id', 'password', 'label'],
                         approve_application: ['id', 'account'], reject_application: ['id', 'why'], clear_login: ['id'] };
 
 /** 관리 명령을 자료 저장소의 admin/ 에 요청 파일로 올린다 (관리자만 부른다 — handle 이 확인한다). */
@@ -117,7 +117,7 @@ export async function submitAdmin(body, env, fetchFn = fetch, now = new Date()) 
   const keys = ADMIN_ACTIONS[body.action];
   if (!keys) return { ok: false, status: 400 };
   const req = { action: body.action };
-  for (const k of keys) if (typeof body[k] === 'string' && body[k].trim()) req[k] = body[k].trim().slice(0, 80);
+  for (const k of keys) if (typeof body[k] === 'string' && body[k].trim()) req[k] = body[k].trim().slice(0, k === 'password' ? 200 : 80);
   req.requested_at = now.toISOString();
   const stamp = now.toISOString().replace(/[-:.TZ]/g, '').slice(0, 17);
   const rand = Array.from(crypto.getRandomValues(new Uint8Array(4)), (b) => b.toString(16).padStart(2, '0')).join('');
@@ -211,81 +211,64 @@ export function requestStatus(cid, acct, checks, queued) {
 //   → 자료 저장소 applications/pending/{신청 번호}.json, 답은 202 {application, claim(찾아갈 번호 — 한 번만 보여 준다)}
 // GET  /api/v1/apply/{신청 번호} + Authorization: Bearer pxc_… (찾아갈 번호)
 //   → pending / rejected(why) / approved: 처음 한 번만 에이전트 열쇠(pxk_)를 내준다 (그때 만들어 지문만 거래소에 보낸다)
-const APP_RE = /^ap-[0-9]{17}-[0-9a-f]{8}$/;
-const CLAIM_RE = /^pxc_[A-Za-z0-9]{32,64}$/;
+// ---------- 참가 원서 (/api/v1/apply — 로그인 없이) ----------
+// 원서에 아이디·비밀번호를 함께 받는다. 비밀번호는 여기서 PBKDF2 로 바꾼 값만 자료 저장소에 둔다.
+// 주인이 수락하면 그 아이디·비밀번호로 /login 에 바로 들어온다. 에이전트 열쇠는 들어온 뒤 "내 설정"에서 만든다.
 const APPLY_MAX_PENDING = 20, APPLY_PER_HOUR = 5;
 const applyRate = new Map();                              // 보낸 곳(IP) → [시, 횟수] — 워커 하나 안에서 대략
+export const LOGIN_ID_RE = /^[a-z][a-z0-9-]{1,19}$/;
 
-async function randomToken(prefix) {
-  const abc = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  return prefix + Array.from(crypto.getRandomValues(new Uint8Array(40)), (b) => abc[b % abc.length]).join('');
+async function pendingApps(env, fetchFn) {
+  const list = await gh(env, `contents/applications/pending?ref=${encodeURIComponent(branch(env))}`, {}, fetchFn);
+  if (!list.ok) return [];
+  const names = (await list.json()).filter((x) => /\.json$/.test(x.name)).map((x) => x.name);
+  const out = [];
+  for (const n of names) { const a = await readJsonFile(env, `applications/pending/${n}`, fetchFn); if (a) out.push(a); }
+  return out;
 }
 
 async function handleApply(request, env, fetchFn, url) {
-  const path = url.pathname;
-  if (path === '/api/v1/apply' && request.method === 'POST') {
-    const ip = request.headers.get('CF-Connecting-IP') || 'x';
-    const hour = Math.floor(Date.now() / 3600000);
-    const [h0, n0] = applyRate.get(ip) || [hour, 0];
-    const n = h0 === hour ? n0 + 1 : 1;
-    applyRate.set(ip, [hour, n]);
-    if (n > APPLY_PER_HOUR) return json({ error: '신청이 너무 잦습니다. 한 시간 뒤에 다시 해 주세요.' }, 429);
-    if (!/^application\/json/i.test(request.headers.get('content-type') || '')) return json({ error: 'JSON 으로 보내 주세요' }, 400);
-    const text = await request.text();
-    if (text.length > 4000) return json({ error: '신청이 너무 깁니다' }, 400);
-    let b; try { b = JSON.parse(text); } catch (e) { b = null; }
-    if (!b || typeof b !== 'object' || Array.isArray(b)) return json({ error: '신청 내용을 읽을 수 없습니다' }, 400);
-    const str = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
-    const app = { real_name: str(b.real_name, 30), name: str(b.name, 30), agent: str(b.agent, 40), want_id: str(b.id, 20).toLowerCase(),
-                  message: str(b.message, 300) };
-    if (app.real_name.length < 2) return json({ error: '신청한 사람의 실명(real_name)을 적어 주세요' }, 400);
-    if (!app.name) return json({ error: '화면에 나올 이름(name)을 적어 주세요' }, 400);
-    if (app.want_id && !/^[a-z][a-z0-9-]{1,19}$/.test(app.want_id)) return json({ error: '바라는 이름표(id)는 영문 소문자로 시작하는 영문·숫자·- 20자까지입니다' }, 400);
-    const list = await gh(env, `contents/applications/pending?ref=${encodeURIComponent(branch(env))}`, {}, fetchFn);
-    if (list.ok && (await list.json()).filter((x) => /\.json$/.test(x.name)).length >= APPLY_MAX_PENDING)
-      return json({ error: '기다리는 신청이 많습니다. 주인이 정리한 뒤 다시 해 주세요.' }, 503);
-    const now = new Date();
-    const stamp = now.toISOString().replace(/[-:.TZ]/g, '').slice(0, 17);
-    const id = `ap-${stamp}-${Array.from(crypto.getRandomValues(new Uint8Array(4)), (x) => x.toString(16).padStart(2, '0')).join('')}`;
-    const claim = await randomToken('pxc_');
-    const rec = { id, ...Object.fromEntries(Object.entries(app).filter(([, v]) => v)), claim_hash: await sha256hex(claim), applied_at: now.toISOString(), status: 'pending' };
-    const r = await gh(env, `contents/applications/pending/${id}.json`, { method: 'PUT', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ message: `참가 신청 ${id}`, branch: branch(env), content: bytesToB64(te.encode(JSON.stringify(rec, null, 1))) }) }, fetchFn);
-    if (!r.ok) return json({ error: '거래소에 전하지 못했습니다. 잠시 뒤 다시 해 주세요.' }, 502);
-    return json({ ok: true, application: id, claim, status: 'pending',
-                  message: '신청을 받았습니다. 찾아갈 번호(claim)는 지금 한 번만 보여 줍니다 — 잘 두세요. 주인이 수락하면 GET /api/v1/apply/{application} 에 Authorization: Bearer {claim} 을 붙여 열쇠를 받아 갑니다.' }, 202);
-  }
-  const m = /^\/api\/v1\/apply\/(ap-[0-9]{17}-[0-9a-f]{8})$/.exec(path);
-  if (m && request.method === 'GET') {
-    const auth = /^Bearer\s+(\S+)$/.exec(request.headers.get('Authorization') || '');
-    if (!auth || !CLAIM_RE.test(auth[1])) return json({ error: '찾아갈 번호가 없거나 맞지 않습니다 (Authorization: Bearer pxc_…)' }, 401);
-    const h = await sha256hex(auth[1]);
-    let rec = null, where = null, sha = null;
-    for (const kind of ['pending', 'done']) {
-      const r = await gh(env, `contents/applications/${kind}/${m[1]}.json?ref=${encodeURIComponent(branch(env))}`, {}, fetchFn);
-      if (r.ok) { const j = await r.json(); rec = JSON.parse(new TextDecoder().decode(b64uToBytes(j.content.replace(/\n/g, '')))); where = kind; sha = j.sha; break; }
-    }
-    if (!rec || rec.claim_hash !== h) return json({ error: '신청 번호나 찾아갈 번호가 맞지 않습니다' }, 401);
-    if (rec.status === 'pending' || where === 'pending') return json({ application: rec.id, status: 'pending', message: '주인이 아직 정하지 않았습니다. 나중에 다시 물어 주세요.' });
-    if (rec.status === 'rejected') return json({ application: rec.id, status: 'rejected', why: rec.why || '' });
-    if (rec.claimed_at) return json({ application: rec.id, status: 'approved', account: rec.account, claimed: true,
-                                      message: '열쇠는 이미 받아 갔습니다. 잃었으면 주인에게 새로 받으세요.' });
-    const k = await newAgentKey();
-    const done = { ...rec, claimed_at: new Date().toISOString() };
-    const w = await gh(env, `contents/applications/done/${rec.id}.json`, { method: 'PUT', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ message: `열쇠 받아 감 ${rec.id}`, branch: branch(env), sha, content: bytesToB64(te.encode(JSON.stringify(done, null, 1))) }) }, fetchFn);
-    if (!w.ok) return json({ error: '열쇠를 내주지 못했습니다. 잠시 뒤 다시 해 주세요.' }, w.status === 409 ? 409 : 502);
-    const r = await submitAdmin({ action: 'set_key', id: rec.account, hash: k.hash, label: '신청 ' + rec.id }, env, fetchFn);
-    if (!r.ok) return json({ error: '열쇠를 거래소에 알리지 못했습니다. 주인에게 알려 주세요.' }, 502);
-    return json({ application: rec.id, status: 'approved', account: rec.account, key: k.key,
-                  message: '에이전트 열쇠입니다. 지금 한 번만 보여 줍니다. 1~2분 뒤부터 쓸 수 있습니다 — 쓰는 법은 에이전트-안내.md.' });
-  }
-  return json({ error: '없는 주소이거나 보내는 방식이 다릅니다' }, 404);
+  if (url.pathname !== '/api/v1/apply' || request.method !== 'POST') return json({ error: '없는 주소이거나 보내는 방식이 다릅니다' }, 404);
+  const ip = request.headers.get('CF-Connecting-IP') || 'x';
+  const hour = Math.floor(Date.now() / 3600000);
+  const [h0, n0] = applyRate.get(ip) || [hour, 0];
+  const n = h0 === hour ? n0 + 1 : 1;
+  applyRate.set(ip, [hour, n]);
+  if (n > APPLY_PER_HOUR) return json({ error: '신청이 너무 잦습니다. 한 시간 뒤에 다시 해 주세요.' }, 429);
+  if (!/^application\/json/i.test(request.headers.get('content-type') || '')) return json({ error: 'JSON 으로 보내 주세요' }, 400);
+  const text = await request.text();
+  if (text.length > 4000) return json({ error: '신청이 너무 깁니다' }, 400);
+  let b; try { b = JSON.parse(text); } catch (e) { b = null; }
+  if (!b || typeof b !== 'object' || Array.isArray(b)) return json({ error: '신청 내용을 읽을 수 없습니다' }, 400);
+  const str = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
+  const app = { real_name: str(b.real_name, 30), name: str(b.name, 30), agent: str(b.agent, 40), want_id: str(b.id, 20).toLowerCase(),
+                message: str(b.message, 300) };
+  const pw = typeof b.password === 'string' ? b.password : '';
+  if (app.real_name.length < 2) return json({ error: '신청한 사람의 실명(real_name)을 적어 주세요' }, 400);
+  if (!app.name) return json({ error: '화면에 나올 이름(name)을 적어 주세요' }, 400);
+  if (!LOGIN_ID_RE.test(app.want_id)) return json({ error: '아이디(id)는 영문 소문자로 시작하는 영문 소문자·숫자·- 2~20자입니다' }, 400);
+  const bad = pwProblem(pw);
+  if (bad) return json({ error: bad }, 400);
+  let cfg;
+  try { cfg = await loadConfig(env, fetchFn); } catch (e) { return json({ error: '거래소 자료를 읽지 못했습니다' }, 502); }
+  const pend = await pendingApps(env, fetchFn);
+  if (pend.length >= APPLY_MAX_PENDING) return json({ error: '기다리는 신청이 많습니다. 주인이 정리한 뒤 다시 해 주세요.' }, 503);
+  if ((cfg.players || []).some((p) => accountId(p) === app.want_id) || pend.some((a) => a.want_id === app.want_id) || /^(p|f)[0-9]+$/.test(app.want_id))
+    return json({ error: '그 아이디는 이미 쓰이고 있습니다. 다른 아이디를 골라 주세요.' }, 409);
+  const now = new Date();
+  const stamp = now.toISOString().replace(/[-:.TZ]/g, '').slice(0, 17);
+  const id = `ap-${stamp}-${Array.from(crypto.getRandomValues(new Uint8Array(4)), (x) => x.toString(16).padStart(2, '0')).join('')}`;
+  const rec = { id, ...Object.fromEntries(Object.entries(app).filter(([, v]) => v)), password: await hashPassword(pw), applied_at: now.toISOString(), status: 'pending' };
+  const r = await gh(env, `contents/applications/pending/${id}.json`, { method: 'PUT', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ message: `참가 신청 ${id}`, branch: branch(env), content: bytesToB64(te.encode(JSON.stringify(rec, null, 1))) }) }, fetchFn);
+  if (!r.ok) return json({ error: '거래소에 전하지 못했습니다. 잠시 뒤 다시 해 주세요.' }, 502);
+  return json({ ok: true, application: id, id: app.want_id, status: 'pending',
+                message: '신청을 받았습니다. 주인이 수락하면 이 아이디와 비밀번호로 /login 에 들어오고, "내 설정"에서 에이전트 열쇠를 만듭니다.' }, 202);
 }
 
 async function handleAgent(request, env, fetchFn, url) {
   const path = url.pathname;
-  if (path === '/api/v1/apply' || path.startsWith('/api/v1/apply/')) return handleApply(request, env, fetchFn, url);
+  if (path === '/api/v1/apply' || path.startsWith('/api/v1/apply/')) return handleApply(request, env, fetchFn, url);   // 예전 찾아가기 주소는 404
   let cfg;
   try { cfg = await loadConfig(env, fetchFn); } catch (e) { return json({ error: '거래소 자료를 읽지 못했습니다' }, 502); }
   const ag = await agentFromKey(request, cfg);
@@ -342,23 +325,60 @@ async function handleAgent(request, env, fetchFn, url) {
   return json({ error: '없는 주소이거나 보내는 방식이 다릅니다' }, 404);
 }
 
-// ---------- 거래소 자체 로그인 (열쇠로) ----------
-// 사람도 그 계좌의 열쇠(pxk_…)로 /login 에서 들어온다. 문지기가 열쇠 지문을 명단과 맞춰 보고
-// 거래소 주소에만 붙는 세션 쿠키(px_session, HttpOnly·Secure·SameSite=Lax, Domain 없음 — sharktalk 다른 서비스와 나누지 않는다)를 준다.
-// 쿠키 = base64url({id, k: 열쇠 지문 앞 16자, exp}).서명 — 서명 열쇠는 GITHUB_TOKEN 에서 끌어낸 HMAC (새 비밀값이 필요 없다).
-// 열쇠를 새로 만들거나 끊으면 지문이 달라져 그 세션도 끝난다. 관리자 = 주인 계좌("main")의 열쇠로 들어온 사람.
+// ---------- 거래소 자체 로그인 (아이디·비밀번호) ----------
+// 아이디 = 계좌 이름표. 비밀번호는 PBKDF2-SHA256(10만 번, 소금 16바이트)으로 바꾼 값만 명단(players[].password)에 둔다 — 원문은 어디에도 남지 않는다.
+// 들어오면 거래소 주소에만 붙는 세션 쿠키(px_session, HttpOnly·Secure·SameSite=Lax, Domain 없음 — sharktalk 다른 서비스와 나누지 않는다)를 준다.
+// 쿠키 = base64url({id, k: 비밀번호 지문 끝 16자, exp}).서명 — 서명 열쇠는 GITHUB_TOKEN 에서 끌어낸 HMAC (새 비밀값이 필요 없다).
+// 비밀번호가 바뀌면 그 세션은 끝난다. 관리자 = 주인 계좌("main")로 들어온 사람.
+// 예전 열쇠 로그인({key})도 받는다 — 비밀번호를 아직 정하지 않은 계좌, 비밀번호를 잃었을 때의 뒷문.
 const SESSION = 'px_session';
 const SESSION_DAYS = 30;
+const PW_ITER = 100000;                                  // Cloudflare Workers 의 PBKDF2 상한
 const loginRate = new Map();                             // 보낸 곳(IP) → [시, 횟수]
 const b64u = (bytes) => bytesToB64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+export function pwProblem(pw) {
+  if (typeof pw !== 'string' || pw.length < 8) return '비밀번호는 8자 이상으로 정해 주세요';
+  if (pw.length > 100) return '비밀번호가 너무 깁니다 (100자까지)';
+  return null;
+}
+
+async function pbkdf2(pw, salt, iter) {
+  const k = await crypto.subtle.importKey('raw', te.encode(pw), 'PBKDF2', false, ['deriveBits']);
+  return new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: iter }, k, 256));
+}
+
+/** 비밀번호 → 'pbkdf2$반복$소금$지문' */
+export async function hashPassword(pw) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  return `pbkdf2$${PW_ITER}$${b64u(salt)}$${b64u(await pbkdf2(pw, salt, PW_ITER))}`;
+}
+
+export async function checkPassword(pw, stored) {
+  const m = /^pbkdf2\$(\d+)\$([A-Za-z0-9_-]+)\$([A-Za-z0-9_-]+)$/.exec(String(stored || ''));
+  if (!m || typeof pw !== 'string') return false;
+  const got = b64u(await pbkdf2(pw, b64uToBytes(m[2]), Number(m[1])));
+  let diff = got.length ^ m[3].length;
+  for (let i = 0; i < Math.min(got.length, m[3].length); i++) diff |= got.charCodeAt(i) ^ m[3].charCodeAt(i);
+  return diff === 0;
+}
+
+/** 읽기 쉬운 임시 비밀번호 (헷갈리는 글자 0·O·1·l·I 는 뺀다). */
+export function tempPassword() {
+  const abc = 'abcdefghijkmnpqrstuvwxyz23456789';
+  return Array.from(crypto.getRandomValues(new Uint8Array(10)), (b) => abc[b % abc.length]).join('').replace(/^(.{5})/, '$1-');
+}
+
+const pwTag = (stored) => String(stored || '').slice(-16);
 
 async function sessionKey(env) {
   const raw = await crypto.subtle.digest('SHA-256', te.encode('px-session:' + (env.GITHUB_TOKEN || '')));
   return crypto.subtle.importKey('raw', raw, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify']);
 }
 
-export async function makeSession(env, id, keyHash, now = Date.now()) {
-  const body = b64u(te.encode(JSON.stringify({ id, k: keyHash.slice(0, 16), exp: now + SESSION_DAYS * 86400000 })));
+/** tag: 비밀번호 지문 끝 16자, 또는 (열쇠로 들어왔으면) 열쇠 지문 앞 16자. */
+export async function makeSession(env, id, tag, now = Date.now()) {
+  const body = b64u(te.encode(JSON.stringify({ id, k: tag.slice(0, 16), exp: now + SESSION_DAYS * 86400000 })));
   const sig = new Uint8Array(await crypto.subtle.sign('HMAC', await sessionKey(env), te.encode(body)));
   return `${body}.${b64u(sig)}`;
 }
@@ -375,20 +395,25 @@ export async function readSession(request, env, now = Date.now()) {
   } catch (e) { return null; }
 }
 
-/** 세션 → 거래소 사람. 열쇠가 바뀌었으면 null. */
+/** 세션 → 거래소 사람. 비밀번호(또는 들어올 때 쓴 열쇠)가 바뀌었으면 null. */
 function meFromSession(sess, cfg) {
   const p = (cfg.players || []).find((x) => accountId(x) === sess.id && validId(accountId(x)));
-  if (!p || !(p.api_keys || []).some((k) => String(k.hash).startsWith(sess.k))) return null;
-  return { email: null, login: null, admin: !!p.main, id: accountId(p), name: p.name || accountId(p), main: !!p.main };
+  if (!p) return null;
+  const ok = (p.password && pwTag(p.password) === sess.k) || (p.api_keys || []).some((k) => String(k.hash).startsWith(sess.k));
+  if (!ok) return null;
+  return { email: null, login: null, admin: !!p.main, id: accountId(p), name: p.name || accountId(p), main: !!p.main,
+           has_password: !!p.password, has_key: !!(p.api_keys || []).length };
 }
 
 const cookie = (val, maxAge) => `${SESSION}=${val}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}`;
+const withCookie = (obj, sess) => new Response(JSON.stringify(obj), { status: 200,
+  headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'Set-Cookie': cookie(sess, SESSION_DAYS * 86400) } });
 
 async function handleLogin(request, env, fetchFn, url) {
   if (url.pathname === '/logout' || url.pathname === '/api/logout') {
     return new Response(null, { status: 303, headers: { Location: '/login', 'Set-Cookie': cookie('', 0), 'cache-control': 'no-store' } });
   }
-  // POST /api/login {key}
+  // POST /api/login {id, password} (또는 예전 {key})
   const ip = request.headers.get('CF-Connecting-IP') || 'x';
   const hour = Math.floor(Date.now() / 3600000);
   const [h0, n0] = loginRate.get(ip) || [hour, 0];
@@ -397,15 +422,27 @@ async function handleLogin(request, env, fetchFn, url) {
   if (n > 20) return json({ error: '시도가 너무 많습니다. 한 시간 뒤에 다시 해 주세요.' }, 429);
   if (!sameOrigin(request)) return json({ error: '이 화면에서 보낸 요청이 아닙니다' }, 403);
   const body = await readBody(request);
-  const key = body && typeof body.key === 'string' ? body.key.trim() : '';
-  if (!KEY_RE.test(key)) return json({ error: '열쇠 모양이 아닙니다 (pxk_ 로 시작합니다)' }, 400);
+  if (!body) return json({ error: '요청 내용을 읽을 수 없습니다' }, 400);
   let cfg;
   try { cfg = await loadConfig(env, fetchFn); } catch (e) { return json({ error: '거래소 자료를 읽지 못했습니다' }, 502); }
-  const ag = await agentFromKey(new Request(url, { headers: { Authorization: `Bearer ${key}` } }), cfg);
-  if (!ag) return json({ error: '맞는 열쇠가 아닙니다' }, 401);
-  const sess = await makeSession(env, ag.id, ag.hash);
-  return new Response(JSON.stringify({ ok: true, id: ag.id, name: ag.name }), { status: 200,
-    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'Set-Cookie': cookie(sess, SESSION_DAYS * 86400) } });
+  if (typeof body.key === 'string' && body.key.trim()) {
+    const key = body.key.trim();
+    if (!KEY_RE.test(key)) return json({ error: '열쇠 모양이 아닙니다 (pxk_ 로 시작합니다)' }, 400);
+    const ag = await agentFromKey(new Request(url, { headers: { Authorization: `Bearer ${key}` } }), cfg);
+    if (!ag) return json({ error: '맞는 열쇠가 아닙니다' }, 401);
+    return withCookie({ ok: true, id: ag.id, name: ag.name }, await makeSession(env, ag.id, ag.hash));
+  }
+  const id = typeof body.id === 'string' ? body.id.trim().toLowerCase() : '';
+  const pw = typeof body.password === 'string' ? body.password : '';
+  if (!id || !pw) return json({ error: '아이디와 비밀번호를 넣어 주세요' }, 400);
+  const p = (cfg.players || []).find((x) => accountId(x) === id && validId(accountId(x)));
+  if (p && p.password && await checkPassword(pw, p.password))
+    return withCookie({ ok: true, id, name: p.name || id }, await makeSession(env, id, pwTag(p.password)));
+  if (!p) {                                               // 아직 수락 전인 원서인지 알려 준다 (비밀번호가 맞을 때만)
+    const a = (await pendingApps(env, fetchFn)).find((x) => x.want_id === id);
+    if (a && await checkPassword(pw, a.password)) return json({ error: '주최자가 아직 원서를 수락하지 않았습니다. 수락되면 이 아이디와 비밀번호로 들어올 수 있습니다.' }, 403);
+  }
+  return json({ error: '아이디나 비밀번호가 맞지 않습니다' }, 401);
 }
 
 /** next: 정적 파일(화면)을 그대로 내주는 함수. */
@@ -436,7 +473,7 @@ export async function handle(request, env, next, fetchFn = fetch) {
   const needLogin = () => {
     const back = encodeURIComponent(url.pathname + (url.search || ''));
     return api ? json({ error: '로그인이 필요합니다' }, 401)
-               : deny(401, `로그인이 필요합니다. <a style="color:#f2c14e" href="/login?next=${back}">열쇠로 들어가기</a>`);
+               : deny(401, `로그인이 필요합니다. <a style="color:#f2c14e" href="/login?next=${back}">들어가기</a><script>location.replace('/login?next=${back}')</script>`);
   };
   if (!sess) return needLogin();
   let cfg;
@@ -446,7 +483,32 @@ export async function handle(request, env, next, fetchFn = fetch) {
   const me = meFromSession(sess, cfg);
   if (!me) return needLogin();                            // 열쇠가 바뀌었거나 끊겼다
 
-  if (path === '/api/me') return json({ id: me.id, name: me.name, admin: me.admin });
+  if (path === '/api/me') return json({ id: me.id, name: me.name, admin: me.admin, has_password: me.has_password, has_key: me.has_key });
+
+  if (path === '/api/password' || path === '/api/key') {   // 내 설정: 비밀번호 바꾸기 · 에이전트 열쇠 만들기 (자기 계좌만)
+    if (request.method !== 'POST') return json({ error: '보내는 방식이 올바르지 않습니다' }, 405);
+    if (!sameOrigin(request)) return json({ error: '이 화면에서 보낸 요청이 아닙니다' }, 403);
+    const body = (await readBody(request)) || {};
+    if (path === '/api/password') {
+      const p = (cfg.players || []).find((x) => accountId(x) === me.id);
+      if (p && p.password && !(await checkPassword(String(body.current || ''), p.password))) return json({ error: '지금 비밀번호가 맞지 않습니다' }, 403);
+      const bad = pwProblem(body.password);
+      if (bad) return json({ error: bad }, 400);
+      const hashed = await hashPassword(body.password);
+      const r = await submitAdmin({ action: 'set_password', id: me.id, password: hashed }, env, fetchFn);
+      if (!r.ok) return json({ error: '거래소에 전하지 못했습니다' }, 502);
+      cfgCache = { at: 0, cfg: null };
+      // 비밀번호가 있던 계좌는 명단이 바뀌는 순간(1~2분 뒤) 지금 세션이 끝난다 — 화면이 새 비밀번호로 다시 들어오라고 안내한다
+      return json({ ok: true, relogin: !!(p && p.password),
+                    message: p && p.password ? '비밀번호를 바꿨습니다. 1~2분 뒤 새 비밀번호로 다시 들어와 주세요.'
+                                             : '비밀번호를 정했습니다. 1~2분 뒤부터 아이디 ' + me.id + ' 와 이 비밀번호로 들어옵니다.' });
+    }
+    const k = await newAgentKey();
+    const r = await submitAdmin({ action: 'set_key', id: me.id, hash: k.hash, label: '내 설정' }, env, fetchFn);
+    if (!r.ok) return json({ error: '거래소에 전하지 못했습니다' }, 502);
+    cfgCache = { at: 0, cfg: null };
+    return json({ ok: true, key: k.key, account: me.id, message: '에이전트 열쇠입니다. 지금 한 번만 보여 줍니다. 1~2분 뒤부터 쓸 수 있고, 예전 열쇠는 끊깁니다.' });
+  }
 
   if (path === '/api/order' || path === '/api/admin') {
     if (request.method !== 'POST') return json({ error: '보내는 방식이 올바르지 않습니다' }, 405);
@@ -455,6 +517,16 @@ export async function handle(request, env, next, fetchFn = fetch) {
     if (!body) return json({ error: '요청 내용을 읽을 수 없습니다' }, 400);
     if (path === '/api/admin') {
       if (!me.admin) return json({ error: '관리자만 할 수 있습니다' }, 403);
+      if (body.action === 'reset_password') {             // 임시 비밀번호 — 주인에게 한 번만 보여 주고, 거래소에는 지문만 간다
+        const id = String(body.id || '').trim().toLowerCase();
+        if (!validId(id)) return json({ error: '이름표를 적어 주세요' }, 400);
+        const pw = tempPassword();
+        const r = await submitAdmin({ action: 'set_password', id, password: await hashPassword(pw), label: 'reset' }, env, fetchFn);
+        if (!r.ok) return json({ error: '거래소에 전하지 못했습니다' }, 502);
+        cfgCache = { at: 0, cfg: null };
+        return json({ ok: true, password: pw, message: `${id} 의 임시 비밀번호입니다. 지금 한 번만 보여 줍니다. 1~2분 뒤부터 아이디 ${id} 와 이 비밀번호로 들어오고, 들어와서 "내 설정"에서 바꾸면 됩니다.` });
+      }
+      if (body.action === 'set_password') return json({ error: '비밀번호는 "비밀번호 새로 만들기"로 바꿉니다' }, 400);
       if (body.action === 'issue_key') {                  // 열쇠는 여기서 만들어 주인에게 한 번만 보여 준다 — 거래소에는 지문만 간다
         const id = String(body.id || '').trim().toLowerCase();
         if (!validId(id)) return json({ error: '이름표를 적어 주세요' }, 400);

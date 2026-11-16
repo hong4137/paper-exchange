@@ -1,7 +1,7 @@
 // 에이전트 입구(/api/v1) 시험 — 네트워크 없이 가짜 저장소로 돈다.
 // 계좌별 열쇠(Bearer pxk_…)로 자기 계좌만 읽고, 요청은 자기 창구(inbox/{이름표}/)에만 올라가는지.
 // 실행: node tests/test_agent_api.mjs
-import { handle, newAgentKey, agentFromKey, requestStatus, makeSession, _resetCaches } from '../site/lib.mjs';
+import { handle, newAgentKey, agentFromKey, requestStatus, makeSession, _resetCaches, checkPassword } from '../site/lib.mjs';
 
 const fails = [];
 const check = (label, cond, detail = '') => {
@@ -111,35 +111,70 @@ const adm = puts.find((x) => x.path.startsWith('admin/'));
 check('주인이 열쇠를 만들면 평문은 한 번만 돌려주고, 거래소에는 지문만 간다', res.status === 200 && /^pxk_/.test(j.key) && adm && adm.body.action === 'set_key'
       && adm.body.id === 'bob' && /^[0-9a-f]{64}$/.test(adm.body.hash) && !JSON.stringify(adm.body).includes(j.key), JSON.stringify({ j, adm }));
 
-console.log('참가 신청 → 주인 수락 → 열쇠 받아 가기');
+console.log('참가 신청 (아이디·비밀번호) → 주인 수락 → 그 아이디로 로그인');
 const ap = async (body, headers = {}) => call('/api/v1/apply', null, { method: 'POST', body, headers: { 'CF-Connecting-IP': '1.2.3.4', ...headers } });
-r = await ap({ name: '돌쇠', agent: '돌쇠봇' });
+r = await ap({ name: '돌쇠', agent: '돌쇠봇', id: 'dolsoe', password: 'secret-123' });
 check('실명이 없으면 받지 않는다', r.status === 400 && /실명/.test(r.data.error), JSON.stringify(r.data));
-r = await ap({ real_name: '김철수', name: '돌쇠', agent: '돌쇠봇', id: 'dolsoe', email: 'kim@example.com', message: '잘 부탁합니다', claim_hash: 'x', status: 'approved' });
+check('아이디가 없거나 비밀번호가 짧으면 받지 않는다', (await ap({ real_name: '김철수', name: '돌쇠', password: 'secret-123' })).status === 400
+      && (await ap({ real_name: '김철수', name: '돌쇠', id: 'dolsoe', password: 'short' })).status === 400, '');
+check('이미 쓰이는 아이디(계좌 이름표)는 받지 않는다', (await ap({ real_name: '김철수', name: '돌쇠', id: 'bob', password: 'secret-123' })).status === 409);
+r = await ap({ real_name: '김철수', name: '돌쇠', agent: '돌쇠봇', id: 'dolsoe', password: 'secret-123', message: '잘 부탁합니다', status: 'approved' });
 const appRec = puts[0]?.body;
-check('신청은 열쇠 없이 받고, applications/pending/ 에 올라간다 (찾아갈 번호는 지문만)', r.status === 202 && /^ap-\d{17}-[0-9a-f]{8}$/.test(r.data.application)
-      && /^pxc_/.test(r.data.claim) && puts[0].path === `applications/pending/${r.data.application}.json` && appRec.real_name === '김철수'
-      && appRec.status === 'pending' && /^[0-9a-f]{64}$/.test(appRec.claim_hash) && !JSON.stringify(appRec).includes(r.data.claim), JSON.stringify(puts));
-const appId = r.data.application, claim = r.data.claim;
+check('신청은 applications/pending/ 에, 비밀번호는 PBKDF2 지문만', r.status === 202 && /^ap-\d{17}-[0-9a-f]{8}$/.test(r.data.application)
+      && puts[0].path === `applications/pending/${r.data.application}.json` && appRec.real_name === '김철수' && appRec.want_id === 'dolsoe'
+      && appRec.status === 'pending' && /^pbkdf2\$100000\$/.test(appRec.password) && !JSON.stringify(appRec).includes('secret-123') && !r.data.claim, JSON.stringify(puts));
+const appId = r.data.application;
+check('비밀번호 지문 확인', await checkPassword('secret-123', appRec.password) && !(await checkPassword('secret-124', appRec.password)));
 files[`applications/pending/${appId}.json`] = appRec;
-const cl = async (key) => (await call(`/api/v1/apply/${appId}`, key)).data;
-check('수락 전에는 pending', (await cl(claim)).status === 'pending');
-check('찾아갈 번호가 틀리면 401', (await call(`/api/v1/apply/${appId}`, 'pxc_' + 'A'.repeat(40))).status === 401 && (await call(`/api/v1/apply/${appId}`)).status === 401);
+{ const rr = await ap({ real_name: '최둘', name: '둘', id: 'dolsoe', password: 'secret-123' }, { 'CF-Connecting-IP': '1.2.3.5' }); check('기다리는 원서와 같은 아이디도 받지 않는다', rr.status === 409, JSON.stringify(rr)); }
+check('예전 찾아가기 주소는 없다', (await call(`/api/v1/apply/${appId}`, 'pxc_' + 'A'.repeat(40))).status === 404);
+const pwLogin = async (id, password, headers = {}) => handle(new Request(site + '/api/login', { method: 'POST',
+  headers: { 'content-type': 'application/json', Origin: site, 'CF-Connecting-IP': '6.6.6.6', ...headers }, body: JSON.stringify({ id, password }) }), env, async () => new Response('화면'), fetchFn);
+let pr = await pwLogin('dolsoe', 'secret-123');
+check('수락 전에 들어오면 "아직 수락 전" (비밀번호가 맞을 때만)', pr.status === 403 && /수락/.test((await pr.json()).error)
+      && (await pwLogin('dolsoe', 'wrong-pass')).status === 401);
 delete files[`applications/pending/${appId}.json`];
-files[`applications/done/${appId}.json`] = { ...appRec, status: 'approved', account: 'dolsoe' };
+players.players.push({ id: 'dolsoe', name: '돌쇠', password: appRec.password });     // 거래소가 수락하면 명단에 지문이 옮겨진다
+_resetCaches();
+pr = await pwLogin('DolSoe', 'secret-123');
+const pc = (pr.headers.get('set-cookie') || '').split(';')[0];
+check('수락되면 그 아이디·비밀번호로 바로 들어온다', pr.status === 200 && /^px_session=/.test(pc));
+const meRes = await handle(new Request(site + '/api/me', { headers: { Cookie: pc } }), env, async () => new Response(''), fetchFn);
+const meJ = await meRes.json();
+check('세션은 그 계좌, 비밀번호 있음·열쇠 없음', meJ.id === 'dolsoe' && meJ.has_password === true && meJ.has_key === false && meJ.admin === false, JSON.stringify(meJ));
+check('틀린 비밀번호·없는 아이디는 같은 답', (await pwLogin('dolsoe', 'secret-12')).status === 401 && (await pwLogin('nobody', 'secret-123')).status === 401);
+const mine = async (path, body) => { puts = []; const res = await handle(new Request(site + path, { method: 'POST',
+  headers: { Cookie: pc, Origin: site, 'content-type': 'application/json' }, body: JSON.stringify(body || {}) }), env, async () => new Response(''), fetchFn);
+  return { status: res.status, data: await res.json() }; };
+let mr = await mine('/api/key');
+const sk = puts.find((x) => x.path.startsWith('admin/'));
+check('내 설정: 에이전트 열쇠를 스스로 만든다 (평문은 한 번만, 거래소에는 지문만)', mr.status === 200 && /^pxk_/.test(mr.data.key) && mr.data.account === 'dolsoe'
+      && sk && sk.body.action === 'set_key' && sk.body.id === 'dolsoe' && !JSON.stringify(sk.body).includes(mr.data.key), JSON.stringify(mr));
+check('내 설정: 지금 비밀번호가 틀리면 못 바꾼다', (await mine('/api/password', { current: 'nope-nope', password: 'newpass-1' })).status === 403);
+mr = await mine('/api/password', { current: 'secret-123', password: 'newpass-1' });
+const sp = puts.find((x) => x.path.startsWith('admin/'));
+check('내 설정: 비밀번호 바꾸기 → set_password (지문만), 다시 들어오라고 알린다', mr.status === 200 && mr.data.relogin === true && sp.body.action === 'set_password'
+      && sp.body.id === 'dolsoe' && await checkPassword('newpass-1', sp.body.password) && !JSON.stringify(sp.body).includes('newpass-1'), JSON.stringify(sp));
+players.players[players.players.length - 1].password = sp.body.password;
+_resetCaches();
+const me2 = await handle(new Request(site + '/api/me', { headers: { Cookie: pc } }), env, async () => new Response(''), fetchFn);
+check('비밀번호가 바뀌면 예전 세션은 끝난다', me2.status === 401);
 puts = [];
-const got = (await call(`/api/v1/apply/${appId}`, claim)).data;
-const setk = puts.find((x) => x.path.startsWith('admin/'));
-const mark = puts.find((x) => x.path === `applications/done/${appId}.json`);
-check('수락되면 처음 한 번 열쇠를 내주고, 거래소에는 지문만 (set_key)', got.status === 'approved' && /^pxk_/.test(got.key) && got.account === 'dolsoe'
-      && setk && setk.body.action === 'set_key' && setk.body.id === 'dolsoe' && /^[0-9a-f]{64}$/.test(setk.body.hash) && mark && mark.body.claimed_at, JSON.stringify({ got, puts }));
-files[`applications/done/${appId}.json`] = mark.body;
-const again = await cl(claim);
-check('두 번째는 열쇠를 다시 주지 않는다', again.status === 'approved' && again.claimed && !again.key);
-files[`applications/done/${appId}.json`] = { ...appRec, status: 'rejected', why: '자리가 없다' };
-check('거절이면 rejected + 사유', (await cl(claim)).status === 'rejected' && (await cl(claim)).why === '자리가 없다');
-for (let i = 0; i < 21; i++) files[`applications/pending/ap-2026111500000000${String(i).padStart(1, '0')}-0000000${i % 10}.json`] = {};
-r = await ap({ real_name: '이영희', name: '영희' }, { 'CF-Connecting-IP': '9.9.9.9' });
+const bossC = 'px_session=' + await makeSession(env, 'boss', kb.hash);
+const rp = await handle(new Request(site + '/api/admin', { method: 'POST', headers: { Cookie: bossC, Origin: site, 'content-type': 'application/json' },
+  body: JSON.stringify({ action: 'reset_password', id: 'dolsoe' }) }), env, async () => new Response(''), fetchFn);
+const rpj = await rp.json();
+const rpa = puts.find((x) => x.path.startsWith('admin/'));
+check('주인: 임시 비밀번호를 만들어 한 번만 보여 주고, 거래소에는 지문만', rp.status === 200 && /^[a-z2-9]{5}-[a-z2-9]{5}$/.test(rpj.password)
+      && rpa.body.action === 'set_password' && await checkPassword(rpj.password, rpa.body.password), JSON.stringify(rpj));
+const raw = await handle(new Request(site + '/api/admin', { method: 'POST', headers: { Cookie: bossC, Origin: site, 'content-type': 'application/json' },
+  body: JSON.stringify({ action: 'set_password', id: 'dolsoe', password: 'pbkdf2$1$x$y' }) }), env, async () => new Response(''), fetchFn);
+check('주인도 set_password 를 직접 보내지는 못한다', raw.status === 400);
+players.players.pop();
+_resetCaches();
+
+for (let i = 0; i < 21; i++) files[`applications/pending/ap-2026111500000000${String(i).padStart(1, '0')}-0000000${i % 10}.json`] = { want_id: 'x' + i };
+r = await ap({ real_name: '이영희', name: '영희', id: 'younghee', password: 'secret-123' }, { 'CF-Connecting-IP': '9.9.9.9' });
 check('기다리는 신청이 20건이면 더 받지 않는다', r.status === 503, JSON.stringify(r.data));
 let lastAp;
 for (let i = 0; i < 6; i++) lastAp = await ap({ real_name: '박', name: 'x' }, { 'CF-Connecting-IP': '5.5.5.5' });
@@ -179,7 +214,7 @@ const lo = await handle(new Request(site + '/logout', { headers: { Cookie: ck } 
 check('나가기: 쿠키를 지우고 로그인 화면으로', lo.status === 303 && /Max-Age=0/.test(lo.headers.get('set-cookie')) && lo.headers.get('location') === '/login');
 check('로그인 화면은 로그인 없이 열린다', (await call('/login')).status === 200 && (await call('/login.html')).status === 200);
 r = await call('/index.html');
-check('로그인 안 했으면 401 과 함께 열쇠로 들어가는 길', r.status === 401 && /\/login\?next=/.test(String(r.data)), String(r.data).slice(0, 200));
+check('로그인 안 했으면 401 과 함께 들어가는 길', r.status === 401 && /\/login\?next=/.test(String(r.data)), String(r.data).slice(0, 200));
 
 const ag = await handle(new Request(site + '/agents.md'), env, async () => new Response('# 안내'), fetchFn);
 check('에이전트 안내(/agents.md)는 로그인 없이 마크다운으로, /agents 는 그리로', ag.status === 200 && /text\/markdown/.test(ag.headers.get('content-type'))

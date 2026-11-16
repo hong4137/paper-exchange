@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>내 설정 — 모의 거래소</title>
+<meta name="robots" content="noindex">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Noto+Sans+KR:wght@400;500;700;900&display=swap" rel="stylesheet">
+<style>
+/* 거래소 화면(내 계좌·주문)과 같은 짙은 남색. 한 가지 모습만 쓴다. */
+:root{--ink:#0b1120; --ink2:#0f1628; --card:#121a2e; --line:#243052; --txt:#e8edf7; --dim:#8b97b3; --gold:#f2c14e; --bad:#ff5b62; --ok:#35c98a; color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0; min-height:100vh; background:var(--ink); color:var(--txt); font-family:'Noto Sans KR',system-ui,sans-serif; font-size:15px; line-height:1.6;
+  padding:20px max(16px, env(safe-area-inset-right, 0px)) 48px max(16px, env(safe-area-inset-left, 0px))}
+.wrap{max-width:560px; margin:0 auto}
+header{display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:20px}
+header b{font-size:17px; font-weight:900}
+.tabs{display:flex; gap:4px; flex-wrap:wrap}
+.tabs a{font-size:13.5px; text-decoration:none; color:var(--dim); padding:5px 12px; border-radius:99px; border:1px solid transparent}
+.tabs a.on{color:var(--txt); border-color:var(--line); background:var(--ink2); font-weight:700}
+section{background:var(--card); border:1px solid var(--line); border-radius:14px; padding:22px 20px; margin-bottom:16px}
+h2{font-size:17px; margin:0 0 6px}
+p{margin:0 0 14px; color:var(--dim)}
+p b{color:var(--txt)}
+label{display:grid; gap:6px; font-weight:500; margin-bottom:12px}
+input{font:inherit; font-size:15px; color:var(--txt); background:var(--ink); border:1px solid var(--line); border-radius:10px; padding:10px 12px; width:100%}
+input:focus-visible,button:focus-visible,a:focus-visible{outline:2px solid var(--gold); outline-offset:2px}
+button{font:inherit; font-weight:700; color:var(--ink); background:var(--txt); border:0; border-radius:10px; padding:10px 16px; cursor:pointer}
+button.sec{background:transparent; color:var(--txt); border:1px solid var(--line)}
+button:disabled{opacity:.5; cursor:default}
+code{display:block; font-family:'IBM Plex Mono',ui-monospace,monospace; font-size:13.5px; background:var(--ink); border:1px solid var(--line); border-radius:10px; padding:10px 12px; margin:6px 0 12px; word-break:break-all; white-space:pre-wrap}
+.msg{min-height:1.4em; margin:10px 0 0; font-size:14px}
+.msg.bad{color:var(--bad)} .msg.ok{color:var(--ok)}
+.hide{display:none}
+.warn{color:var(--gold)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header><b>내 설정</b><nav class="tabs" id="tabs"><a href="index.html">내 계좌</a><a href="trade.html">주문</a><a class="on" href="me.html">내 설정</a><a href="/logout">나가기</a></nav></header>
+
+  <section>
+    <h2>비밀번호</h2>
+    <p id="who">불러오는 중입니다.</p>
+    <form id="pf" novalidate>
+      <label id="curl" class="hide">지금 비밀번호<input id="cur" type="password" autocomplete="current-password"></label>
+      <label>새 비밀번호 <small style="color:var(--dim);font-weight:400">(8자 이상)</small><input id="pw1" type="password" autocomplete="new-password"></label>
+      <label>새 비밀번호 한 번 더<input id="pw2" type="password" autocomplete="new-password"></label>
+      <button type="submit" id="pgo">비밀번호 정하기</button>
+      <p class="msg" id="pm" role="status"></p>
+    </form>
+  </section>
+
+  <section>
+    <h2>에이전트 열쇠</h2>
+    <p>에이전트가 이 계좌로 직접 주문할 때 쓰는 열쇠입니다. 만들면 <b>한 번만</b> 보여 주고, 다시 만들면 예전 열쇠는 끊깁니다. 사람은 열쇠 없이 아이디·비밀번호로 들어옵니다.</p>
+    <p id="kstate"></p>
+    <p id="kwarn" class="warn hide">아직 비밀번호가 없어 지금은 열쇠로 들어와 있습니다. 열쇠를 새로 만들면 1~2분 뒤 이 화면에서 나가게 되니, 위에서 비밀번호부터 정하세요.</p>
+    <button type="button" id="kgo">에이전트 열쇠 만들기</button>
+    <p class="msg" id="km" role="status"></p>
+    <div id="kout" class="hide">
+      <p style="margin-top:14px"><b>열쇠 — 지금 한 번만 보입니다.</b> 에이전트가 도는 곳의 환경변수 <b>PXK</b> 에 넣으세요. 대화창에는 붙여 넣지 마세요(기록에 남습니다).</p>
+      <code id="kval"></code>
+      <p><b>에이전트에게 붙여 넣을 말</b> (마지막 줄은 바꿔 써도 됩니다)</p>
+      <code id="brief"></code>
+      <button type="button" class="sec" id="copyb">붙여 넣을 말 복사</button>
+      <p class="msg" id="bm" role="status"></p>
+    </div>
+  </section>
+</div>
+<script>
+const $ = (s) => document.querySelector(s);
+const say = (el, t, c) => { el.textContent = t; el.className = 'msg ' + (c || ''); };
+let ME = null;
+const brief = (acct) => [
+  '너는 "천하제일 에이전트 모의투자 대회"에 내 계좌(' + acct + ')로 참가한다. 가상의 돈 5,000만 원이고 실제 돈은 오가지 않는다.',
+  '쓰는 법: https://exchange.sharktalk.co.kr/agents.md 를 먼저 끝까지 읽어라.',
+  '열쇠는 환경변수 PXK 에 있다. 모든 요청에 "Authorization: Bearer $PXK" 를 붙인다. 열쇠를 화면·기록·다른 곳에 옮겨 적지 마라.',
+  '처음에는 GET /api/v1/account 로 계좌를 보고, 주문은 먼저 "dry_run": true 로 검사한 뒤에 낸다.',
+  '내 허락 없이 계좌의 큰 비중을 한 번에 움직이지 마라. 무엇을 왜 샀는지 나에게 짧게 보고해라.'
+].join('\n');
+const post = async (path, body) => {
+  const r = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) });
+  return [r, await r.json().catch(() => ({}))];
+};
+(async () => {
+  try {
+    const r = await fetch('/api/me'); if (!r.ok) throw 0;
+    ME = await r.json();
+  } catch (e) { $('#who').textContent = '로그인한 뒤에 쓸 수 있습니다.'; return; }
+  if (ME.admin) $('#tabs a[href="/logout"]').insertAdjacentHTML('beforebegin', '<a href="admin.html">관리자 화면</a>');
+  $('#who').innerHTML = '아이디 <b></b>' + (ME.has_password ? ' — 비밀번호를 바꿀 수 있습니다.' : ' — 아직 비밀번호가 없습니다. 정해 두면 다음부터 아이디와 비밀번호로 들어옵니다.');
+  $('#who b').textContent = ME.id;
+  if (ME.has_password) { $('#curl').classList.remove('hide'); $('#pgo').textContent = '비밀번호 바꾸기'; }
+  else $('#kwarn').classList.remove('hide');
+  $('#kstate').textContent = ME.has_key ? '지금 열쇠가 하나 있습니다.' : '아직 열쇠가 없습니다.';
+})();
+$('#pf').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const a = $('#pw1').value, b = $('#pw2').value;
+  if (a.length < 8) return say($('#pm'), '비밀번호는 8자 이상으로 정해 주세요.', 'bad');
+  if (a !== b) return say($('#pm'), '두 칸의 비밀번호가 다릅니다.', 'bad');
+  $('#pgo').disabled = true; say($('#pm'), '보내는 중입니다.');
+  try {
+    const [r, j] = await post('/api/password', { current: $('#cur').value, password: a });
+    $('#pgo').disabled = false;
+    if (!r.ok) return say($('#pm'), j.error || '바꾸지 못했습니다.', 'bad');
+    $('#cur').value = $('#pw1').value = $('#pw2').value = '';
+    say($('#pm'), j.message, 'ok');
+  } catch (err) { $('#pgo').disabled = false; say($('#pm'), '바꾸지 못했습니다. 잠시 뒤 다시 해 주세요.', 'bad'); }
+});
+$('#kgo').addEventListener('click', async () => {
+  if (ME && ME.has_key && !confirm('지금 쓰는 열쇠가 끊깁니다. 새로 만들까요?')) return;
+  $('#kgo').disabled = true; say($('#km'), '만드는 중입니다.');
+  try {
+    const [r, j] = await post('/api/key');
+    $('#kgo').disabled = false;
+    if (!r.ok) return say($('#km'), j.error || '만들지 못했습니다.', 'bad');
+    $('#kval').textContent = j.key; $('#brief').textContent = brief(j.account);
+    $('#kout').classList.remove('hide');
+    say($('#km'), j.message, 'ok');
+  } catch (err) { $('#kgo').disabled = false; say($('#km'), '만들지 못했습니다. 잠시 뒤 다시 해 주세요.', 'bad'); }
+});
+$('#copyb').addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText($('#brief').textContent); say($('#bm'), '복사했습니다.', 'ok'); }
+  catch (err) { const r = document.createRange(); r.selectNodeContents($('#brief')); const s = getSelection(); s.removeAllRanges(); s.addRange(r); say($('#bm'), '글을 골라 두었습니다. 복사해 주세요.'); }
+});
+</script>
+</body>
+</html>

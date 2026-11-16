@@ -32,24 +32,27 @@ button:disabled{opacity:.5; cursor:default}
 <main class="box">
   <span class="tag">가상의 돈 · 실제 주문 아님</span>
   <h1>모의 거래소에 들어가기</h1>
-  <p>계좌의 열쇠(<span style="font-family:'IBM Plex Mono',monospace">pxk_</span> 로 시작)를 넣으세요. 에이전트가 쓰는 열쇠와 같습니다. 이 주소에서만 쓰는 로그인입니다.</p>
+  <p>참가 원서에 적은 아이디와 비밀번호로 들어옵니다. 이 주소에서만 쓰는 로그인입니다.</p>
   <form id="f" novalidate>
-    <label for="key">열쇠<input id="key" type="password" autocomplete="current-password" spellcheck="false" autocapitalize="none" placeholder="pxk_…"></label>
+    <label for="uid">아이디<input id="uid" autocomplete="username" spellcheck="false" autocapitalize="none"></label>
+    <label for="pw">비밀번호<input id="pw" type="password" autocomplete="current-password"></label>
     <button type="submit" id="go">들어가기</button>
     <p class="msg" id="m" role="status"></p>
   </form>
-  <div class="foot">열쇠가 없으면 <a href="/apply">참가 원서</a>를 내세요. 에이전트용 안내는 <a href="/agents.md">/agents.md</a>.<br> 주최자가 수락하면 열쇠를 받습니다.<br>열쇠를 잃었으면 주최자에게 새로 받으세요(예전 열쇠는 끊깁니다).</div>
+  <div class="foot">아직 계좌가 없으면 <a href="/apply">참가 원서</a>를 내세요. 주최자가 수락하면 바로 들어올 수 있습니다.<br>비밀번호를 잊었으면 주최자에게 임시 비밀번호를 받으세요.<br>에이전트용 안내는 <a href="/agents.md">/agents.md</a>.</div>
 </main>
 <script>
 const m = document.getElementById('m');
 const say = (t, c) => { m.textContent = t; m.className = 'msg ' + (c || ''); };
 document.getElementById('f').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const key = document.getElementById('key').value.trim();
-  if (!/^pxk_[A-Za-z0-9]{32,64}$/.test(key)) return say('열쇠를 그대로 붙여 넣어 주세요 (pxk_ 로 시작합니다).', 'bad');
+  const v = document.getElementById('uid').value.trim(), pw = document.getElementById('pw').value;
+  // 예전 열쇠(pxk_…)를 아이디 칸이나 비밀번호 칸에 넣어도 들어온다 — 비밀번호를 아직 정하지 않은 계좌용
+  const key = /^pxk_[A-Za-z0-9]{32,64}$/.test(v) ? v : /^pxk_[A-Za-z0-9]{32,64}$/.test(pw) ? pw : '';
+  if (!key && (!v || !pw)) return say('아이디와 비밀번호를 넣어 주세요.', 'bad');
   const go = document.getElementById('go'); go.disabled = true; say('확인하는 중입니다.');
   try {
-    const r = await fetch('/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key }) });
+    const r = await fetch('/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(key ? { key } : { id: v, password: pw }) });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) { go.disabled = false; return say(j.error || '들어가지 못했습니다.', 'bad'); }
     say((j.name || '') + ' 계좌로 들어갑니다.', 'ok');
