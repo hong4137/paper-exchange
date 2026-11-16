@@ -229,8 +229,11 @@ def _real_name(cfg, aid):
     return p.get("real_name")
 
 
+PW_RE = re.compile(r"pbkdf2\$[0-9]{4,7}\$[A-Za-z0-9_-]{16,64}\$[A-Za-z0-9_-]{32,128}")
+
+
 def _applications():
-    """관리자 화면용 참가 신청: 기다리는 것 전부 + 최근에 정한 것 20건. 찾아갈 번호의 지문은 싣지 않는다."""
+    """관리자 화면용 참가 신청: 기다리는 것 전부 + 최근에 정한 것 20건. 찾아갈 번호·비밀번호의 지문은 싣지 않는다."""
     out = []
     for kind in ("pending", "done"):
         d = HOME / "applications" / kind
@@ -240,7 +243,7 @@ def _applications():
                 a = json.loads(f.read_text(encoding="utf-8"))
             except Exception:
                 continue
-            items.append({k: v for k, v in a.items() if k != "claim_hash"} | {"status": a.get("status") or "pending"})
+            items.append({k: v for k, v in a.items() if k not in ("claim_hash", "password")} | {"status": a.get("status") or "pending"})
         out += items if kind == "pending" else items[-20:]
     return out
 
@@ -1889,15 +1892,31 @@ def admin_do(cfg, req):
                 want = f"f{n}"
             if app.get("email") and any(str(p.get("email") or "").lower() == app["email"].lower() for p in players):
                 raise Refused("그 이메일은 이미 다른 계좌에 쓰이고 있습니다")
+            pw = app.get("password") if PW_RE.fullmatch(str(app.get("password") or "")) else None
             players.append({k: v for k, v in {"id": want, "name": app.get("name") or want, "agent": app.get("agent") or "에이전트",
-                                              "email": app.get("email"), "real_name": app.get("real_name"), "application": aid}.items() if v})
+                                              "email": app.get("email"), "real_name": app.get("real_name"), "application": aid,
+                                              "password": pw, "password_at": pw and now().isoformat(timespec="seconds")}.items() if v})
             app.update(status="approved", account=want, decided_at=now().isoformat(timespec="seconds"))
-            msg = f"{app.get('real_name')} 님의 신청을 수락했습니다 — 계좌 `{want}` 가 열립니다. 신청한 쪽이 찾아갈 번호로 열쇠를 받아 갑니다"
+            app.pop("password", None)                    # 비밀번호 지문은 명단으로만 옮기고 원서에서는 지운다
+            msg = (f"{app.get('real_name')} 님의 신청을 수락했습니다 — 계좌 `{want}` 가 열립니다. "
+                   + (f"아이디 `{want}` 와 원서에 적은 비밀번호로 들어옵니다" + ("" if want == app.get("want_id") else " (바란 아이디가 쓰이고 있어 바꿨습니다 — 알려 주세요)")
+                      if pw else "비밀번호가 없는 원서라 관리자 화면에서 비밀번호를 만들어 건네야 합니다"))
         dst = HOME / "applications" / "done" / f"{aid}.json"
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_text(json.dumps(app, ensure_ascii=False, indent=1), encoding="utf-8")
         src.unlink()
         return msg
+    if act == "set_password":                         # 사람의 비밀번호 — 문지기가 PBKDF2 로 바꾼 값만 온다 (원문은 어디에도 없다)
+        pid = str(req.get("id") or "").strip().lower()
+        cur = next((p for p in cfg.get("players") or [] if str(p.get("id") or p.get("github") or "").lower() == pid), None)
+        if not cur:
+            raise Refused(f"`{pid}` 은(는) 명단에 없습니다")
+        pw = str(req.get("password") or "")
+        if not PW_RE.fullmatch(pw):
+            raise Refused("비밀번호 지문이 올바르지 않습니다")
+        cur["password"] = pw
+        cur["password_at"] = now().isoformat(timespec="seconds")
+        return f"`{pid}` 의 비밀번호를 바꿨습니다" + (" (임시 비밀번호)" if req.get("label") == "reset" else "")
     if act in ("set_key", "revoke_key"):               # 에이전트 열쇠 — 문지기가 만들어 주인에게 한 번만 보여 주고, 여기에는 지문(sha256)만 온다
         pid = str(req.get("id") or "").strip().lower()
         cur = next((p for p in cfg.get("players") or [] if str(p.get("id") or p.get("github") or "").lower() == pid), None)
@@ -1911,7 +1930,7 @@ def admin_do(cfg, req):
             raise Refused("열쇠 지문이 올바르지 않습니다")
         cur["api_keys"] = [{"hash": h, "created": now().isoformat(timespec="seconds"), "label": str(req.get("label") or "")[:40]}]
         return f"`{pid}` 의 에이전트 열쇠를 새로 달았습니다 (예전 열쇠는 끊김)"
-    raise Refused("모르는 관리 명령입니다 (add_player · remove_player · add_contest · remove_contest · set_key · revoke_key · approve_application · reject_application · clear_login)")
+    raise Refused("모르는 관리 명령입니다 (add_player · remove_player · add_contest · remove_contest · set_key · revoke_key · set_password · approve_application · reject_application · clear_login)")
 
 
 def cmd_admin_issue(author, body):

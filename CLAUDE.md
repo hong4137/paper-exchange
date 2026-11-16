@@ -66,6 +66,7 @@ data/prices/          하루 시세 캐시 (끝난 거래일만) — 평가와 �
 data/minutes/         1분 시세, 종목별·날짜별 파일 (미국은 1분이 없는 날을 5분으로 메움) — 체결에 쓴다
 data/live_raw/        장전 수집기가 읽은 원본
 docs/index.html       내 계좌 화면 — 계좌 하나 (성적·잔고·전표·흐름). `?a=계정` 이면 그 참가자, 없으면 주인 계좌(docs/data/state.json). 다른 계좌나 순위는 여기 나오지 않는다. 주문 양식은 없다(주문 페이지로)
+docs/me.html          내 설정 — 비밀번호 바꾸기, 에이전트 열쇠 만들기(붙여 넣을 말과 함께)
 docs/trade.html       주문 페이지 — 시장 현황, 종목 검색, 종목 현황(현재가·오늘 그래프·호가 단위·상하한가·내 보유), 주문·환전 양식, 기다리는 주문과 취소. sharktalk 주소에서 로그인한 참가자만
 docs/admin.html       관리자 화면 — 모든 계좌의 수익률을 한 표로 (docs/data/league.json 을 읽는다). 거래소 화면에서 오는 길은 없다
 docs/data/league.json 전체 계좌 수익률(기간별·대회) / docs/data/accounts/{계정}.json 계좌별 화면 자료 (주인 계좌도 한 벌 들어 있다)
@@ -164,22 +165,26 @@ retired/              (엔진) 쓰지 않게 된 이슈 창구·이슈 양식·�
   요청 안의 계좌 이름은 보지 않는다 — 열쇠의 계좌다. 쓰는 법은 `에이전트-안내.md`(공개 저장소에 있어도 되는 글 — 열쇠는 없다).
 - **검사만**: 요청에 `"dry_run": true` → 거래소가 창구에서 `check_request` 만 하고 `docs/data/checks/{이름표}.json`(최근 50건)에 남긴다. 장부에는 쓰지 않는다.
 - 취소 줄의 요청 번호는 그 주문의 `result.client_id` 에 남는다(요청 결과 찾기용).
-- **친구 계좌**: 참가 원서(`/apply`)를 수락하거나, 관리자 화면 "참가자 관리"에서 이름표·화면 이름·에이전트 → "열쇠 만들기". 사람은 그 열쇠로 `/login`.
+- **친구 계좌**: 참가 원서(`/apply`)를 수락하면 그 아이디·비밀번호로 바로 `/login`. 관리자 화면에서 직접 넣었으면 "비밀번호 새로 만들기"로 임시 비밀번호를 건넨다. 에이전트 열쇠는 본인이 "내 설정"(`docs/me.html`)에서 만든다.
 - 진짜 막힘이다: 열쇠로는 자기 계좌와 시장 정보 말고 아무것도 열리지 않는다. 그래서 형제 가리기도 이 길로 옮기면 "약속"이 아니라 잠금이 된다.
 - **참가 신청 → 주인 수락**(사용자 결정 2026-11-15: "내가 수락해 주는 방식으로. 신청 양식에 주인의 실명을 넣을 것" — 신청하는 사람의 실명, 필수):
-  `POST /api/v1/apply`(열쇠 없이) `{real_name, name, agent, id(바라는 이름표), message}` → 자료 저장소 `applications/pending/{ap-…}.json`(찾아갈 번호 `pxc_…` 는 sha256 지문만), 답 202 `{application, claim}` — claim 은 한 번만.
+  (2026-11-16 바뀜 — 아래 "로그인" 절) `POST /api/v1/apply`(로그인 없이) `{real_name, name, agent, id(아이디 = 이름표, 필수), password(8자 이상), message}` → 자료 저장소 `applications/pending/{ap-…}.json`(비밀번호는 PBKDF2 지문만), 답 202.
+  이미 쓰이는(명단·기다리는 원서) 아이디나 `p{번호}`·`f{번호}` 는 409. 찾아갈 번호(`pxc_…`)·`GET /api/v1/apply/{id}` 는 없앴다.
   사람용 화면은 `docs/apply.html`(`/apply`). 로그인 없이 열리는 것은 `/apply`·`/login`·`/agents.md`(에이전트 안내 — 원본 `에이전트-안내.md` 를 site-deploy 가 `docs/agents.md` 로 복사해 올린다, 저장소에는 올리지 않음).
-  원서 화면은 열쇠를 내줄 때 "에이전트에게 붙여 넣을 말"(안내 주소·열쇠는 환경변수 PXK·dry_run 먼저)을 복사 버튼과 함께 보여 준다(사용자 2026-11-16). 한 곳(IP)에서 한 시간 5번, 기다리는 원서 20건까지(워커 안에서 대략).
-  관리자 화면 "참가 신청"에서 수락·거절 → `admin/` `{"action": "approve_application" | "reject_application", "id", "account"?, "why"?}` → 엔진이 명단에 `{id, name, agent, email, real_name, application}` 을 넣고(바라는 이름표가 없거나 쓰이고 있으면 `f{번호}`) 원서를 `applications/done/` 으로 옮긴다.
-  `GET /api/v1/apply/{id}` + `Bearer pxc_…` → pending / rejected(why) / approved: **처음 한 번만** 문지기가 열쇠를 만들어 내주고 지문을 `set_key` 로 보낸다(원서에 `claimed_at`). 두 번째부터는 다시 주지 않는다 — 잃으면 주인이 관리자 화면에서 새로 만든다.
+  한 곳(IP)에서 한 시간 5번, 기다리는 원서 20건까지(워커 안에서 대략). 새 원서가 들어오면 자료 저장소 relay 가 엔진을 깨워 관리자 화면에 바로 실린다.
+  관리자 화면 "참가 신청"에서 수락·거절 → `admin/` `{"action": "approve_application" | "reject_application", "id", "account"?, "why"?}` → 엔진이 명단에 `{id, name, agent, real_name, application, password}` 를 넣고(아이디가 쓰이고 있으면 `f{번호}` — 그때는 주인이 알려 줘야 한다) 원서의 비밀번호 지문은 지우고 `applications/done/` 으로 옮긴다.
   **실명은 관리자 자료(league.json `players[].real_name`·`applications`)에만** — 계좌 화면 자료·state.json 에는 싣지 않는다. 원서는 지우지 않고 done 에 쌓인다(나중에 정리할 일).
 
-### 로그인 — 거래소 자체 열쇠 (사용자 결정 2026-11-16: "로그인 체계 다시 만들어. 샤크토크를 섞으면 어떻게 해")
+### 로그인 — 거래소 자체 아이디·비밀번호 (사용자 결정 2026-11-16: "로그인 체계 다시 만들어. 샤크토크를 섞으면 어떻게 해" → "아이디/비번 로그인이 아니라 이렇게까지 어렵게 만드는 이유는?")
 - **sharktalk 로그인(`sharktalk-auth`)은 쓰지 않는다.** 섞으면 거래소에 초대한 친구에게 sharktalk 계정이 생기고, 그 계정으로 다른 sharktalk 서비스가 열릴 수 있다. 다시 붙이려면 사용자에게 묻는다.
-- 사람도 그 계좌의 열쇠(`pxk_…`, 에이전트와 같은 것)로 `/login` 에 들어온다 → 문지기가 `px_session` 쿠키를 준다(HttpOnly·Secure·SameSite=Lax, **Domain 없음 = 이 주소에만**, 30일).
-  쿠키 = base64url({id, k: 열쇠 지문 앞 16자, exp}).HMAC — 서명 열쇠는 `GITHUB_TOKEN` 에서 끌어낸다(새 비밀값 없음). 열쇠를 새로 만들거나 끊으면 세션도 끝난다. `/logout`. 로그인 시도는 IP 시간당 20번.
-- **관리자 = 주인 계좌("main")의 열쇠로 들어온 사람.** `ADMIN_EMAILS` 는 쓰지 않는다. 주인 열쇠를 잃으면 관리자 화면에 들어갈 길이 없다 — 그때는 자료 저장소에 `admin/` `set_key` 요청을 직접 올려 주인 계좌에 새 열쇠를 단다(평문 열쇠는 사용자만 갖는다).
-- 로그인 없이 열리는 화면은 `/login`·`/apply` 둘뿐이다. 명단의 `email`·`login` 칸은 더 이상 쓰이지 않는다(관리 명령 `clear_login` 으로 지운다).
+- 사람은 **아이디(= 계좌 이름표)·비밀번호**로 `/login` 에 들어온다. 비밀번호는 문지기가 PBKDF2-SHA256(10만 번 — Workers 상한, 소금 16바이트)으로 바꾼 `pbkdf2$반복$소금$지문` 만 명단 `players[].password`(+`password_at`)에 둔다. 원문은 어디에도 남지 않는다. 화면 자료에는 싣지 않는다(시험이 본다).
+  들어오면 `px_session` 쿠키(HttpOnly·Secure·SameSite=Lax, **Domain 없음 = 이 주소에만**, 30일). 쿠키 = base64url({id, k: 비밀번호 지문 끝 16자 | 열쇠 지문 앞 16자, exp}).HMAC — 서명 열쇠는 `GITHUB_TOKEN` 에서 끌어낸다(새 비밀값 없음).
+  비밀번호가 바뀌면 그 세션은 끝난다. `/logout`. 로그인 시도는 IP 시간당 20번. 수락 전 원서의 아이디·비밀번호로 들어오면 "아직 수락 전"이라고 답한다.
+- **비밀번호 바꾸기**: 본인이 "내 설정"(`docs/me.html`, `/api/password` — 지금 비밀번호 확인) → `admin/` `{"action": "set_password", "id", "password": 지문}`. 주인은 관리자 화면 "비밀번호 새로 만들기"(`reset_password` — 문지기가 임시 비밀번호를 만들어 한 번만 보여 준다). `/api/admin` 으로 `set_password` 를 직접 보내는 길은 막았다.
+- **에이전트 열쇠**는 본인이 "내 설정"에서 만든다(`/api/key` → `set_key`, 평문은 한 번만, "에이전트에게 붙여 넣을 말"과 함께). 주인도 관리자 화면에서 만들 수 있다.
+- **예전 열쇠 로그인도 남겼다**(`/api/login {key}` — 로그인 칸에 열쇠를 넣어도 된다): 비밀번호를 아직 정하지 않은 계좌, 비밀번호를 잃었을 때의 뒷문. 열쇠 세션은 열쇠를 새로 만들면 끝난다.
+- **관리자 = 주인 계좌("main")로 들어온 사람.** `ADMIN_EMAILS` 는 쓰지 않는다. 주인이 비밀번호와 열쇠를 모두 잃으면 자료 저장소에 `admin/` `set_key` 요청을 직접 올려 주인 계좌에 새 열쇠를 단다(평문 열쇠는 사용자만 갖는다).
+- 로그인 없이 열리는 화면은 `/login`·`/apply`(+ 안내 `/agents.md`)뿐이다. 명단의 `email`·`login` 칸은 더 이상 쓰이지 않는다(관리 명령 `clear_login` 으로 지운다).
 - 주소는 여전히 `exchange.sharktalk.co.kr` 이다(이름만 같은 도메인). 워커·올리기는 아래 sharktalk 절 그대로.
 
 ### 화면을 sharktalk 주소로 (사용자 결정 2026-11-14 — 2026-11-15 올림. **로그인 부분은 2026-11-16 위 절로 바뀌었다 — 아래 sharktalk-auth·①②·ADMIN_EMAILS 이야기는 지난 기록**)

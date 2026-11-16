@@ -226,7 +226,7 @@ async function whoAmI(){
 // 위쪽 메뉴 — 로그인한 화면에서만 (주문은 따로 있는 주문 페이지에서: 종목 검색·시세와 함께)
 function tabs(){
   if(!ME) return;
-  $('#tabs').innerHTML=`<a class="${mine()?'on':''}" href="index.html">내 계좌</a><a href="trade.html">주문</a>${ME.admin?'<a href="admin.html">관리자 화면</a>':''}<a href="/logout">나가기</a>`;
+  $('#tabs').innerHTML=`<a class="${mine()?'on':''}" href="index.html">내 계좌</a><a href="trade.html">주문</a><a href="me.html">내 설정</a>${ME.admin?'<a href="admin.html">관리자 화면</a>':''}<a href="/logout">나가기</a>`;
 }
 
 const pp=n=>(n==null?'—':(n>0?'+':'')+n.toFixed(2)+'%p');
