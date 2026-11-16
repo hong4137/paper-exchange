@@ -415,6 +415,15 @@ export async function handle(request, env, next, fetchFn = fetch) {
   if (path.startsWith('/api/v1/')) return handleAgent(request, env, fetchFn, url);   // 에이전트는 로그인 대신 열쇠
   if (path === '/api/login' && request.method === 'POST') return handleLogin(request, env, fetchFn, url);
   if (path === '/logout' || path === '/api/logout') return handleLogin(request, env, fetchFn, url);
+  if (path === '/agents' && request.method === 'GET') return new Response(null, { status: 301, headers: { Location: '/agents.md' } });
+  if (path === '/agents.md' && request.method === 'GET') {           // 에이전트 안내 — 로그인 없이 (원본은 저장소의 에이전트-안내.md, 올릴 때 복사)
+    const res = await next();
+    const headers = new Headers(res.headers);
+    headers.set('content-type', 'text/markdown; charset=utf-8');
+    headers.set('cache-control', 'public, max-age=300');
+    headers.set('x-robots-tag', 'noindex');
+    return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+  }
   if ((path === '/apply' || path === '/apply.html' || path === '/login' || path === '/login.html') && request.method === 'GET') {   // 참가 원서·로그인 — 로그인 없이 열리는 화면
     const res = await next();
     const headers = new Headers(res.headers);

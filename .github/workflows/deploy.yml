@@ -13,6 +13,7 @@ on:
       - 'docs/.assetsignore'
       - 'site/**'
       - 'wrangler.jsonc'
+      - '에이전트-안내.md'
       - '.github/workflows/deploy.yml'
   workflow_dispatch:
 
@@ -56,7 +57,9 @@ jobs:
         if: steps.key.outputs.ok == 'true'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: npx --yes wrangler deploy
+        run: |
+          cp 에이전트-안내.md docs/agents.md   # 에이전트 안내를 거래소 주소(/agents.md)에서도 — 원본은 저장소의 에이전트-안내.md 하나
+          npx --yes wrangler deploy
       - name: 문지기가 자료 저장소를 읽을 열쇠 넣기
         if: steps.key.outputs.ok == 'true'
         env:
@@ -85,3 +88,6 @@ jobs:
             exit 1
           fi
           echo "전부 막힘 (401)"
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$SITE/agents.md")
+          echo "/agents.md → $code (로그인 없이 열려야 한다)"
+          [ "$code" = "200" ] || { echo "::error::에이전트 안내(/agents.md)가 열리지 않습니다"; exit 1; }
