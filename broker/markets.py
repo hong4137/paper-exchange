@@ -201,6 +201,51 @@ def earliest_fill(o, t):
     return None
 
 
+# 정기 실행을 부르는 바깥 깨우미(통합 개발/경제브리핑/gas-waker.gs 의 "모의 거래소 정기 실행")와 같은 규칙. 그쪽을 바꾸면 여기도 맞춘다.
+# 정한 시각(서울)에 한 번씩 + 장중에는 20분 칸마다 한 번. 깨우미는 10분마다 깨어나므로 실제로는 그 시각부터 10분 안에 돈다.
+# 칸의 요일은 그 시간대가 시작한 날의 요일이다(미국장 22:30~06:00 은 월~금 밤에 시작한 것만). 휴장일은 따지지 않는다.
+WAKE_TIMES = ["06:20", "07:20", "16:20", "20:20", "21:20", "22:20"]
+WAKE_EVERY = [{"minutes": 20, "from": "09:00", "to": "15:40", "weekdays": [1, 2, 3, 4, 5]},
+              {"minutes": 20, "from": "22:30", "to": "06:00", "weekdays": [1, 2, 3, 4, 5]}]
+WAKE_GRACE_MIN = 10
+
+
+def _hm(s):
+    h, m = s.split(":")
+    return int(h) * 60 + int(m)
+
+
+def _wake_cell(c):
+    """시각 c 가 장중 칸 안이면 그 칸 [(날짜, 칸 번호)], 아니면 []."""
+    m, wd = c.hour * 60 + c.minute, c.isoweekday()
+    out = []
+    for w in WAKE_EVERY:
+        a, b = _hm(w["from"]), _hm(w["to"])
+        if a <= b:
+            inside, start_wd = a <= m < b, wd
+        elif m >= a:
+            inside, start_wd = True, wd
+        else:
+            inside, start_wd = m < b, (wd - 2) % 7 + 1
+        if inside and start_wd in w["weekdays"]:
+            out.append((c.date(), m // w["minutes"]))
+    return out
+
+
+def next_wake(t):
+    """바깥 깨우미가 정기 실행을 다음에 부를 시각(그 시각부터 10분 안에 돈다). 반환 datetime(서울).
+    지금 장중 칸 안이면 그 칸은 이미 불린 것으로 보고 다음 칸부터 찾는다."""
+    t = t.astimezone(KST).replace(second=0, microsecond=0)
+    done = set(_wake_cell(t))
+    for i in range(1, 3 * 24 * 60):
+        c = t + timedelta(minutes=i)
+        if any(c.hour * 60 + c.minute == _hm(s) for s in WAKE_TIMES):
+            return c
+        if any(x not in done for x in _wake_cell(c)):
+            return c
+    return None
+
+
 def next_cron(t, minute=7):
     """매시 minute 분에 도는 정기 실행의 다음 예정 시각 (GitHub 예약은 몇 분~몇십 분 늦을 수 있다)."""
     t = t.astimezone(KST)

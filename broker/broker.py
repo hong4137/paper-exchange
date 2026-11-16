@@ -1127,8 +1127,9 @@ def build():
         "prices_asof": asof,
         "fx": fx_now,
         "markets": {m: mk.status(m, t_now) for m in ("KR", "US", "FX")},
-        "next_run": {"exchange": mk.next_cron(t_now).isoformat(timespec="minutes"),
-                     "note": "매시 7분 정기 실행 (GitHub 예약은 몇 분~몇십 분 늦을 수 있다). 주문·취소 요청은 올라오면 1분 안팎에 따로 접수된다."},
+        "next_run": {"exchange": mk.next_wake(t_now).isoformat(timespec="minutes"),
+                     "note": "정기 실행은 바깥 깨우미가 부른다 — 한국·미국 정규장 동안 20분마다, 그 밖에는 06:20·07:20·16:20·20:20·21:20·22:20. "
+                             "적힌 시각부터 10분 안쯤 돈다. 주문·취소 요청은 올라오면 1분 안팎에 따로 접수된다(체결 계산은 정기 실행 때)."},
         "calendar": {"source": "holidays 0.108 의 KRX·NYSE 달력 (broker/markets.py)", "until": f"{max(mk.CAL_YEARS)}-12-31",
                      "missing": "임시공휴일, 수능일·새해 첫날의 늦은 개장"},
         "quotes": quotes,
@@ -2029,7 +2030,7 @@ def cmd_issue(a):
                 lines.append(f"- {msg}")
         lines.insert(0, f"**{acct['name']}** 계좌 · 접수 시각 {now().strftime('%Y-%m-%d %H:%M')} (한국)")
         lines.append("")
-        lines.append("체결은 주문 뒤에 시작한 1분 시세부터 이뤄지고, 매시 정기 실행 때 장부와 화면에 반영됩니다.")
+        lines.append("체결은 주문 뒤에 시작한 1분 시세부터 이뤄지고, 정기 실행(장중에는 20분마다) 때 장부와 화면에 반영됩니다.")
     text = "\n".join(lines)
     print(text)
     if os.environ.get("PAPER_REPLY"):

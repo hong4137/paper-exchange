@@ -91,7 +91,14 @@ check("미국 추수감사절 휴장, 다음 날 13:00 조기 폐장", mk.status
 check("환율: 주말 닫힘, 월 07:00(한국) 다시 열림", mk.status("FX", K("2026-11-15T12:00"))["next_open"] == "2026-11-16T07:00+09:00"
       and mk.status("FX", K("2026-11-16T12:00"))["state"] == "r")
 check("표 밖의 해는 알린다", mk.status("KR", K("2029-03-02T12:00"))["calendar_ok"] is False and mk.status("KR", K("2027-03-02T12:00"))["calendar_ok"])
-check("다음 정기 실행: 매시 7분", mk.next_cron(K("2026-11-15T17:19")).isoformat() == "2026-11-15T18:07:00+09:00"
+check("다음 정기 실행: 장중 20분 칸·정한 시각 (바깥 깨우미 규칙)",
+      mk.next_wake(K("2026-11-17T10:05")).isoformat() == "2026-11-17T10:20:00+09:00"     # 화 장중 → 다음 20분 칸
+      and mk.next_wake(K("2026-11-17T15:45")).isoformat() == "2026-11-17T16:20:00+09:00"  # 장 끝 → 정한 시각
+      and mk.next_wake(K("2026-11-17T22:25")).isoformat() == "2026-11-17T22:30:00+09:00"  # 미국장 칸 시작
+      and mk.next_wake(K("2026-11-21T07:30")).isoformat() == "2026-11-21T16:20:00+09:00"  # 토 아침: 장중 칸 없음
+      and mk.next_wake(K("2026-11-17T01:00")).isoformat() == "2026-11-17T01:20:00+09:00", # 월 밤에 시작한 미국장 칸
+      str([mk.next_wake(K(x)) for x in ("2026-11-17T10:05", "2026-11-17T15:45", "2026-11-17T22:25", "2026-11-21T07:30", "2026-11-17T01:00")]))
+check("다음 정기 실행: 매시 7분 (예전 계산, 남겨 둠)", mk.next_cron(K("2026-11-15T17:19")).isoformat() == "2026-11-15T18:07:00+09:00"
       and mk.next_cron(K("2026-11-15T17:05")).isoformat() == "2026-11-15T17:07:00+09:00")
 ef = lambda o, t: mk.earliest_fill(o, K(t)).isoformat(timespec="minutes")
 check("가장 빠른 체결: 시장가는 다음 정규장의 첫 1분, 장중이면 다음 1분", ef({"market": "KR", "type": "market"}, "2026-11-15T17:19") == "2026-11-16T09:00+09:00"
@@ -145,7 +152,7 @@ check("시세를 받을 수 없는 번호는 받지 않고 사유를 남긴다",
 print("state.json 에 더한 것")
 check("시장 상태 (토요일: 한국·미국 닫힘)", s["markets"]["KR"]["state"] == "closed" and s["markets"]["KR"]["next_open"] == "2026-11-16T09:00+09:00"
       and s["markets"]["US"]["state"] == "closed" and set(s["markets"]) == {"KR", "US", "FX"}, s["markets"])
-check("다음 정기 실행 예정 시각", s["next_run"]["exchange"] == "2026-11-14T10:07+09:00", s["next_run"])
+check("다음 정기 실행 예정 시각 (토요일 아침 → 16:20)", s["next_run"]["exchange"] == "2026-11-14T16:20+09:00", s["next_run"])
 check("대기 주문마다 가장 빠른 체결 시각", o1["earliest_fill"] == "2026-11-16T09:00+09:00", o1)
 q = s["quotes"].get("005930") or {}
 check("대기 종목의 값: 종가·마지막 1분 값(장후)·호가 단위·상하한가", q.get("close") == 100000 and q.get("close_date") == "2026-11-13"
