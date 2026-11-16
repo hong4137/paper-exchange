@@ -1,7 +1,7 @@
 // 주문 페이지 시장 정보 시험 — 네트워크 없이 가짜 원천 응답으로 돈다. 실제 원천은 tests/probe_market.mjs 가 본다.
 // 실행: node tests/test_market.mjs
 import * as M from '../site/market.mjs';
-import { handle, _resetCaches } from '../site/lib.mjs';
+import { handle, makeSession, newAgentKey, _resetCaches } from '../site/lib.mjs';
 
 const fails = [];
 const check = (label, cond, detail = '') => {
@@ -111,22 +111,22 @@ check('빈 검색은 빈 목록', (await M.search('  ', fetchFn)).items.length =
 
 console.log('문지기 뒤에서');
 _resetCaches(); M._resetMarket();
-const cfg = { players: [{ github: 'boss', name: '주인', main: true }, { id: 'alice', name: '앨리스', email: 'alice@example.com' }] };
-const env = { GITHUB_REPO: 'o/r', GITHUB_TOKEN: 't', ADMIN_EMAILS: 'boss@example.com',
-  AUTH_SVC: { fetch: async (req) => /st_session=alice/.test(req.headers.get('cookie') || '')
-    ? Response.json({ authenticated: true, user: { email: 'alice@example.com' } }) : Response.json({ authenticated: false }, { status: 401 }) } };
+const ak = await newAgentKey();
+const cfg = { players: [{ github: 'boss', name: '주인', main: true }, { id: 'alice', name: '앨리스', api_keys: [{ hash: ak.hash }] }] };
+const env = { GITHUB_REPO: 'o/r', GITHUB_TOKEN: 't' };
+const aliceCookie = 'px_session=' + await makeSession(env, 'alice', ak.hash);
 const gw = async (url, init) => url.includes('api.github.com') ? Response.json(cfg) : fetchFn(url, init);
 const call = async (path, cookie, method = 'GET') => {
   const r = await handle(new Request('https://ex.test' + path, { method, headers: cookie ? { Cookie: cookie } : {} }), env, async () => new Response('화면'), gw);
   return { status: r.status, data: await r.json().catch(() => null) };
 };
 check('로그인하지 않으면 시장 정보도 내주지 않는다', (await call('/api/market')).status === 401 && (await call('/api/quote?symbol=MU')).status === 401);
-let r = await call('/api/quote?symbol=005930', 'st_session=alice');
+let r = await call('/api/quote?symbol=005930', aliceCookie);
 check('로그인한 참가자는 종목 현황을 본다', r.status === 200 && r.data.price === 209000, JSON.stringify(r.data).slice(0, 120));
-r = await call('/api/search?q=%EC%82%BC%EC%84%B1', 'st_session=alice');
+r = await call('/api/search?q=%EC%82%BC%EC%84%B1', aliceCookie);
 check('로그인한 참가자는 검색한다', r.status === 200 && r.data.items.length >= 2);
-check('시장 정보는 읽기만 (GET 말고는 받지 않는다)', (await call('/api/market', 'st_session=alice', 'POST')).status === 405);
-r = await call('/api/quote?symbol=ZZZZ', 'st_session=alice');
+check('시장 정보는 읽기만 (GET 말고는 받지 않는다)', (await call('/api/market', aliceCookie, 'POST')).status === 405);
+r = await call('/api/quote?symbol=ZZZZ', aliceCookie);
 check('원천이 답하지 않으면 사람 말로 알린다', r.status === 502 && /시세를 받지 못했습니다/.test(r.data.error), JSON.stringify(r.data));
 
 console.log(`\n${fails.length ? '실패 ' + fails.length + '건' : '전부 통과'}`);

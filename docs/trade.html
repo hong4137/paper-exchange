@@ -285,7 +285,7 @@ async function post(path, body){
   }catch(e){ return {ok:false, text:'보내지 못했습니다. 잠시 뒤 다시 해 주세요.'}; }
 }
 function tabs(){
-  $('#tabs').innerHTML=`<a href="index.html">내 계좌</a><a class="on" href="trade.html">주문</a>${ME&&ME.admin?'<a href="admin.html">관리자 화면</a>':''}`;
+  $('#tabs').innerHTML=`<a href="index.html">내 계좌</a><a class="on" href="trade.html">주문</a>${ME&&ME.admin?'<a href="admin.html">관리자 화면</a>':''}<a href="/logout">나가기</a>`;
 }
 function spark(v,w,h,base){
   if(!v||v.length<2) return '';
@@ -588,7 +588,7 @@ async function main(){
   try{ const r=await fetch('api/me',{cache:'no-store'}); ME=r.ok?await r.json():null; }catch(e){ ME=null; }
   tabs();
   if(!ME||!ME.id){
-    $('#app').innerHTML=`<p class="empty" style="margin-top:20px">주문 페이지는 sharktalk 주소(exchange.sharktalk.co.kr)에 로그인한 참가자만 쓸 수 있습니다.${ME&&ME.admin?' 관리자 계정에 연결된 계좌가 없습니다.':''}<br><a href="index.html">계좌 화면으로</a></p>`;
+    $('#app').innerHTML=`<p class="empty" style="margin-top:20px">주문 페이지는 거래소 주소(exchange.sharktalk.co.kr)에 계좌 열쇠로 들어온 참가자만 쓸 수 있습니다.${ME&&ME.admin?' 관리자 계정에 연결된 계좌가 없습니다.':''}<br><a href="index.html">계좌 화면으로</a></p>`;
     return;
   }
   $('#app').innerHTML=`
