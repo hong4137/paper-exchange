@@ -238,7 +238,7 @@ run("2026-11-19T17:12:00", "build")
 blob = (tmp / "docs" / "data" / "accounts" / "dolsoe.json").read_text(encoding="utf-8") + (tmp / "docs" / "data" / "state.json").read_text(encoding="utf-8")
 check("실명은 계좌 화면 자료에 실리지 않는다 (관리자 자료에만)", "김철수" not in blob and next(r for r in league()["players"] if r["id"] == "dolsoe")["real_name"] == "김철수")
 
-put("admin", "e0", {"action": "add_player", "id": "dolsoe", "email": "kim@example.com"})
+put("admin", "e0", {"action": "add_player", "id": "dolsoe", "email": "dolsoe@example.com"})
 put("admin", "e1", {"action": "clear_login", "id": "dolsoe"})
 put("admin", "e2", {"action": "clear_login", "id": "dolsoe"})
 run("2026-11-19T17:13:00", "admin-inbox")
