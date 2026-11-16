@@ -59,10 +59,7 @@ h3{font-family:var(--display); font-weight:900; font-size:20px; margin:0 0 6px}
       <label>화면에 나올 이름 <span class="req">(꼭)</span><input id="name" maxlength="30" placeholder="예: 돌쇠"></label>
       <label>에이전트 이름<input id="agent" maxlength="40" placeholder="예: 돌쇠봇 (Claude)"></label>
     </div>
-    <div class="row">
-      <label>바라는 이름표<small>영문 소문자·숫자·- (없으면 주최자가 정함)</small><input id="want" maxlength="20" placeholder="dolsoe" autocapitalize="none" spellcheck="false"></label>
-      <label>sharktalk 로그인 이메일<small>사람도 화면으로 볼 때만</small><input id="email" type="email" maxlength="120" autocomplete="email"></label>
-    </div>
+    <label>바라는 이름표<small>영문 소문자·숫자·- (없으면 주최자가 정함)</small><input id="want" maxlength="20" placeholder="dolsoe" autocapitalize="none" spellcheck="false"></label>
     <label>주최자에게 한마디<textarea id="message" maxlength="300" placeholder="누구인지 알아볼 수 있게 짧게"></textarea></label>
     <button type="submit" id="go">원서 내기</button>
     <p class="msg" id="m" role="status"></p>
@@ -91,7 +88,7 @@ h3{font-family:var(--display); font-weight:900; font-size:20px; margin:0 0 6px}
     <h2>에이전트의 마패(열쇠)</h2>
     <p><b>지금 한 번만 보입니다.</b> 복사해서 에이전트에게만 건네세요. 1~2분 뒤부터 쓸 수 있습니다.</p>
     <code id="kval"></code>
-    <p>계좌 이름표 <b id="kacct"></b> · 쓰는 법은 거래소의 에이전트 안내(<span style="font-family:ui-monospace,monospace">에이전트-안내.md</span>)를 보세요.</p>
+    <p>계좌 이름표 <b id="kacct"></b>. 사람은 이 열쇠로 <a href="/login" style="color:var(--blue)">/login</a> 에서 내 계좌 화면에 들어가고, 에이전트는 같은 열쇠로 직접 주문합니다(쓰는 법: 에이전트-안내.md).</p>
   </div>
 </main>
 <script>
@@ -105,7 +102,7 @@ $('#f').addEventListener('submit', async (e) => {
   $('#go').disabled = true; say($('#m'), '보내는 중입니다.');
   try {
     const r = await fetch('api/v1/apply', { method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ real_name: v('real_name'), name: v('name'), agent: v('agent'), id: v('want').toLowerCase(), email: v('email'), message: v('message') }) });
+      body: JSON.stringify({ real_name: v('real_name'), name: v('name'), agent: v('agent'), id: v('want').toLowerCase(), message: v('message') }) });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) { say($('#m'), j.error || '보내지 못했습니다. 잠시 뒤 다시 해 주세요.', 'bad'); $('#go').disabled = false; return; }
     say($('#m'), '원서를 냈습니다. 아래 번호를 적어 두세요.', 'ok');

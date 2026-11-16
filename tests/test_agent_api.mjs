@@ -1,7 +1,7 @@
 // 에이전트 입구(/api/v1) 시험 — 네트워크 없이 가짜 저장소로 돈다.
 // 계좌별 열쇠(Bearer pxk_…)로 자기 계좌만 읽고, 요청은 자기 창구(inbox/{이름표}/)에만 올라가는지.
 // 실행: node tests/test_agent_api.mjs
-import { handle, newAgentKey, agentFromKey, requestStatus, _resetCaches } from '../site/lib.mjs';
+import { handle, newAgentKey, agentFromKey, requestStatus, makeSession, _resetCaches } from '../site/lib.mjs';
 
 const fails = [];
 const check = (label, cond, detail = '') => {
@@ -46,7 +46,7 @@ const fetchFn = async (url, init = {}) => {
   }
   return new Response('?', { status: 500 });
 };
-const env = { GITHUB_REPO: 'owner/data', GITHUB_TOKEN: 'tok', AUTH_SVC: { fetch: async () => Response.json({ authenticated: false }, { status: 401 }) } };
+const env = { GITHUB_REPO: 'owner/data', GITHUB_TOKEN: 'tok' };
 const site = 'https://exchange.sharktalk.co.kr';
 async function call(path, key, { method = 'GET', body, headers = {} } = {}) {
   const h = { ...headers };
@@ -102,12 +102,10 @@ check('남의 요청 번호로는 남의 결과를 못 본다', (await call('/ap
 check('requestStatus 직접', requestStatus('a', { orders: [{ client_id: 'a', id: 'O1' }] }, [], false).status === 'accepted');
 
 console.log('관리자: 열쇠 발급');
-const stEnv = { ...env, ADMIN_EMAILS: 'boss@example.com',
-  AUTH_SVC: { fetch: async (req) => req.headers.get('cookie') === 'st_session=boss'
-    ? Response.json({ authenticated: true, user: { email: 'boss@example.com' } }) : Response.json({ authenticated: false }, { status: 401 }) } };
 puts = [];
-const res = await handle(new Request(site + '/api/admin', { method: 'POST', headers: { Cookie: 'st_session=boss', Origin: site, 'content-type': 'application/json' },
-  body: JSON.stringify({ action: 'issue_key', id: 'bob' }) }), stEnv, async () => new Response(''), fetchFn);
+const bossCookie = 'px_session=' + await makeSession(env, 'boss', kb.hash);
+const res = await handle(new Request(site + '/api/admin', { method: 'POST', headers: { Cookie: bossCookie, Origin: site, 'content-type': 'application/json' },
+  body: JSON.stringify({ action: 'issue_key', id: 'bob' }) }), env, async () => new Response(''), fetchFn);
 const j = await res.json();
 const adm = puts.find((x) => x.path.startsWith('admin/'));
 check('주인이 열쇠를 만들면 평문은 한 번만 돌려주고, 거래소에는 지문만 간다', res.status === 200 && /^pxk_/.test(j.key) && adm && adm.body.action === 'set_key'
