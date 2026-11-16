@@ -527,6 +527,19 @@ export async function handle(request, env, next, fetchFn = fetch) {
 
   if (path === '/api/me') return json({ id: me.id, name: me.name, admin: me.admin, has_password: me.has_password, has_key: me.has_key });
 
+  if (path === '/api/members') {                          // 관리자 화면의 회원 목록 — 명단 + 로그인 창고의 있음/없음만 (지문은 내주지 않는다)
+    if (!me.admin) return json({ error: '관리자만 볼 수 있습니다' }, 403);
+    const out = [];
+    for (const p of cfg.players || []) {
+      const id = accountId(p);
+      if (!validId(id)) continue;
+      const keys = [...((await kvGet(env, `keys:${id}`)) || []), ...(p.api_keys || [])];
+      out.push({ id, name: p.name || id, agent: p.agent || '', real_name: p.real_name || '', main: !!p.main, parent: p.parent || '',
+                 has_password: !!(await pwOf(env, p)), has_key: keys.length > 0 });
+    }
+    return json({ members: out });
+  }
+
   if (path === '/api/password' || path === '/api/key') {   // 내 설정: 비밀번호 바꾸기 · 에이전트 열쇠 만들기 (자기 계좌만)
     if (request.method !== 'POST') return json({ error: '보내는 방식이 올바르지 않습니다' }, 405);
     if (!sameOrigin(request)) return json({ error: '이 화면에서 보낸 요청이 아닙니다' }, 403);

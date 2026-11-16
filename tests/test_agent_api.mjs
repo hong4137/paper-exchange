@@ -185,6 +185,13 @@ check('원서 시절 비밀번호는 그 원서로 열린 계좌에만 맞는다
 const raw = await handle(new Request(site + '/api/admin', { method: 'POST', headers: { Cookie: bossC, Origin: site, 'content-type': 'application/json' },
   body: JSON.stringify({ action: 'set_password', id: 'dolsoe', password: 'pbkdf2$1$x$y' }) }), env, async () => new Response(''), fetchFn);
 check('주인도 set_password 를 직접 보내지는 못한다', raw.status === 400);
+const mem = async (c) => handle(new Request(site + '/api/members', { headers: { Cookie: c } }), env, async () => new Response(''), fetchFn);
+const ml = await (await mem(bossC)).json();
+const md = (ml.members || []).find((x) => x.id === 'dolsoe');
+check('회원 목록: 주인만, 비밀번호·열쇠는 있음/없음만 (지문은 없다)', md && md.has_password === true && md.has_key === true && md.name === '돌쇠'
+      && (ml.members || []).some((x) => x.main) && !JSON.stringify(ml).includes('pbkdf2') && !/[0-9a-f]{64}/.test(JSON.stringify(ml))
+      && (await mem(pc2)).status !== 200 && (await mem('px_session=x.y')).status === 401
+      && (await mem('px_session=' + await makeSession(env, 'bob', k2.hash))).status === 403, JSON.stringify(ml));
 players.players.pop();
 _resetCaches();
 
