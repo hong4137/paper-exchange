@@ -172,6 +172,23 @@ check("달러 예수금 = 환전으로 들어온 달러 - 미국 주식 산 값 
 check("자동 환전은 달러가 모자랐던 미국 매수 체결마다 한 번 (BBB, CCC)", sum(e["type"] == "fx" for e in led) == 2, str(sum(e["type"] == "fx" for e in led)))
 check("장부 지문 이상 없음", st["integrity"]["ok"])
 
+# 정기 실행이 늦었고 그 실행에서 마지막 거래일 시세를 못 받았을 때 — 종가 주문을 만료시키지 않고 기다린다 (2026-11-17 선수 질문)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "broker"))
+import matching as _mt  # noqa: E402
+_o = {"id": "X1", "market": "US", "symbol": "QQQ", "side": "buy", "type": "moc", "qty": 1, "ts": "2026-11-16T10:00:00+09:00",
+      "valid_until": "2026-11-17", "filled_qty": 0}
+_bars = [{"d": "2026-11-13", "o": 600, "h": 600, "l": 600, "c": 600}]
+_ctx = lambda bars, today: {"daily": {"bars": bars}, "minutes": lambda d: None, "minute_dates": [], "held": 0, "pending_buy": False,
+                            "last_buy_ts": None, "last_buy_date": None, "size_fn": lambda *x, **k: 10**9, "cfg": {}, "today": today}
+check("마지막 거래일 시세가 아직 없으면 기한이 지나도 만료하지 않는다", _mt.next_event(_o, _ctx(_bars, "2026-11-18")) is None)
+_ev = _mt.next_event(_o, _ctx(_bars + [{"d": "2026-11-16", "o": 610, "h": 615, "l": 605, "c": 612}], "2026-11-18"))
+check("그 시세가 들어오면 늦게라도 그날 종가로 체결된다", bool(_ev) and _ev[0] == "fill", str(_ev)[:160])
+_two = _bars + [{"d": "2026-11-16", "o": 610, "h": 615, "l": 605, "c": 612}]
+_lim = {**_o, "type": "limit", "price": 500}
+check("미국 11-17 거래일(서울 11-17 밤에 열림)도 유효기간 안이라, 그 시세가 오기 전에는 만료하지 않는다", _mt.next_event(_lim, _ctx(_two, "2026-11-18")) is None)
+_ev = _mt.next_event(_lim, _ctx(_two + [{"d": "2026-11-17", "o": 612, "h": 620, "l": 608, "c": 615}], "2026-11-18"))
+check("마지막 거래일까지 보고도 안 맞으면 그때 만료한다", bool(_ev) and _ev[0] == "expire", str(_ev))
+
 shutil.rmtree(tmp, ignore_errors=True)
 print(f"\n{'전부 통과' if not fails else '실패 ' + str(len(fails)) + '건'}")
 sys.exit(1 if fails else 0)

@@ -216,8 +216,27 @@ def next_event(o, ctx):
             if price is not None:
                 return _daily_fill(o, d, price, remaining, ctx, _session_ts(d, market))
     last = max(bars_by_date) if bars_by_date else ""
-    if last > o["valid_until"] or ctx["today"] > o["valid_until"]:
+    if last > o["valid_until"]:
         return ("expire", f"유효기간({o['valid_until']})까지 조건이 맞지 않음")
+    if ctx["today"] > o["valid_until"]:
+        # 유효기간 안의 마지막 거래일 시세가 아직 캐시에 없으면(정기 실행이 늦었는데 그 실행에서 시세를 못 받았을 때) 만료하지 않고 기다린다.
+        # 그 시세가 들어오면 위 반복에서 체결이 먼저 따져진다. 시장 달력을 모르는 종목(환율 등)은 예전처럼 날짜만 본다.
+        due = last_trading_day(market, o["valid_until"], d_min)
+        if due is None or last >= due:
+            return ("expire", f"유효기간({o['valid_until']})까지 조건이 맞지 않음")
+    return None
+
+
+def last_trading_day(market, until, since):
+    """since 와 until 사이(둘 다 포함)에서 그 시장의 마지막 정규장 날. 달력을 모르는 시장이거나 그런 날이 없으면 None."""
+    if market not in ("KR", "US"):
+        return None
+    d = datetime.strptime(until, "%Y-%m-%d").date()
+    lo = datetime.strptime(since, "%Y-%m-%d").date()
+    while d >= lo:
+        if mk.is_trading_day(market, d):
+            return d.isoformat()
+        d -= timedelta(days=1)
     return None
 
 
