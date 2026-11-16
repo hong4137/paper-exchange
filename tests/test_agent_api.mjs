@@ -9,8 +9,8 @@ const check = (label, cond, detail = '') => {
   if (!cond) fails.push(label);
 };
 
-const k1 = await newAgentKey(), k2 = await newAgentKey();
-const players = { players: [{ github: 'boss', name: '주인', main: true },
+const k1 = await newAgentKey(), k2 = await newAgentKey(), kb = await newAgentKey();
+const players = { players: [{ github: 'boss', name: '주인', main: true, api_keys: [{ hash: kb.hash }] },
                             { id: 'p1', name: '1호', agent: '선수', api_keys: [{ hash: k1.hash }] },
                             { id: 'bob', name: '밥', email: 'bob@example.com', agent: '친구 에이전트', api_keys: [{ hash: k2.hash }] }] };
 const files = {
@@ -149,6 +149,39 @@ check('한 곳에서 한 시간에 5번을 넘으면 429', lastAp.status === 429
 
 check('참가 원서 화면은 로그인 없이 열리고, 다른 화면은 여전히 막힌다', (await call('/apply.html')).status === 200 && (await call('/apply')).status === 200
       && (await call('/index.html')).status === 401 && (await call('/admin.html')).status === 401);
+
+console.log('거래소 자체 로그인 (열쇠 → 이 주소에만 붙는 세션)');
+const login = async (key, headers = {}) => handle(new Request(site + '/api/login', { method: 'POST',
+  headers: { 'content-type': 'application/json', Origin: site, 'CF-Connecting-IP': '7.7.7.7', ...headers }, body: JSON.stringify({ key }) }), env, async () => new Response('화면'), fetchFn);
+let lr = await login(k2.key);
+const setc = lr.headers.get('set-cookie') || '';
+check('맞는 열쇠면 세션 쿠키 (HttpOnly·Secure·SameSite, Domain 없음 = 이 주소에만)', lr.status === 200 && /^px_session=[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+;/.test(setc)
+      && /HttpOnly/.test(setc) && /Secure/.test(setc) && /SameSite=Lax/.test(setc) && !/Domain=/i.test(setc), setc);
+const ck = setc.split(';')[0];
+const withC = async (path, c = ck) => { const res = await handle(new Request(site + path, { headers: { Cookie: c } }), env, async () => new Response('화면'), fetchFn);
+  const t = await res.text(); let d; try { d = JSON.parse(t); } catch (e) { d = t; } return { status: res.status, data: d }; };
+r = await withC('/api/me');
+check('세션으로 자기 계좌 (관리자 아님)', r.status === 200 && r.data.id === 'bob' && r.data.admin === false, JSON.stringify(r.data));
+check('세션으로 화면·자기 자료는 열리고, 관리자 화면·남의 자료는 막힌다', (await withC('/index.html')).status === 200 && (await withC('/data/accounts/bob.json')).status === 200
+      && (await withC('/admin.html')).status === 403 && (await withC('/data/accounts/p1.json')).status === 403 && (await withC('/data/league.json')).status === 403);
+const ckb = (await login(kb.key)).headers.get('set-cookie').split(';')[0];
+r = await withC('/api/me', ckb);
+check('주인 계좌의 열쇠로 들어오면 관리자', r.data.admin === true && r.data.id === 'boss' && (await withC('/admin.html', ckb)).status === 200, JSON.stringify(r.data));
+check('틀린 열쇠·모양이 아닌 열쇠·다른 사이트에서 온 요청은 안 된다', (await login('pxk_' + 'Z'.repeat(40))).status === 401 && (await login('hello')).status === 400
+      && (await login(k2.key, { Origin: 'https://evil.example' })).status === 403);
+check('위조한 쿠키는 안 된다', (await withC('/api/me', ck.replace(/\.[^.]+$/, '.AAAA'))).status === 401
+      && (await withC('/api/me', 'px_session=' + Buffer.from(JSON.stringify({ id: 'boss', k: kb.hash.slice(0, 16), exp: Date.now() + 1e9 })).toString('base64url') + '.x')).status === 401);
+const oldKeys = players.players[2].api_keys;
+players.players[2].api_keys = [{ hash: (await newAgentKey()).hash }];
+_resetCaches();
+check('열쇠를 새로 만들면 예전 세션은 끝난다', (await withC('/api/me')).status === 401);
+players.players[2].api_keys = oldKeys;
+_resetCaches();
+const lo = await handle(new Request(site + '/logout', { headers: { Cookie: ck } }), env, async () => new Response(''), fetchFn);
+check('나가기: 쿠키를 지우고 로그인 화면으로', lo.status === 303 && /Max-Age=0/.test(lo.headers.get('set-cookie')) && lo.headers.get('location') === '/login');
+check('로그인 화면은 로그인 없이 열린다', (await call('/login')).status === 200 && (await call('/login.html')).status === 200);
+r = await call('/index.html');
+check('로그인 안 했으면 401 과 함께 열쇠로 들어가는 길', r.status === 401 && /\/login\?next=/.test(String(r.data)), String(r.data).slice(0, 200));
 
 console.log('요청 횟수 막이');
 let last;

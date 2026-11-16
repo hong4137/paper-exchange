@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>들어가기 — 모의 거래소</title>
+<meta name="robots" content="noindex">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Noto+Sans+KR:wght@400;500;700;900&display=swap" rel="stylesheet">
+<style>
+/* 거래소 화면(내 계좌·주문)과 같은 짙은 남색. 한 가지 모습만 쓴다. */
+:root{--ink:#0b1120; --card:#121a2e; --line:#243052; --txt:#e8edf7; --dim:#8b97b3; --gold:#f2c14e; --bad:#ff5b62; --ok:#35c98a; color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0; min-height:100vh; background:var(--ink); color:var(--txt); font-family:'Noto Sans KR',system-ui,sans-serif; font-size:15px; line-height:1.6;
+  display:grid; place-items:center; padding-block:32px; padding-left:max(16px, env(safe-area-inset-left, 0px)); padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.box{width:100%; max-width:420px; background:var(--card); border:1px solid var(--line); border-radius:14px; padding:28px 24px}
+h1{font-size:20px; font-weight:900; margin:0 0 4px; letter-spacing:-.02em}
+.tag{display:inline-block; font-size:12px; padding:2px 9px; border-radius:99px; border:1px solid var(--gold); color:var(--gold); margin-bottom:14px}
+p{margin:0 0 16px; color:var(--dim)}
+label{display:grid; gap:6px; font-weight:500; margin-bottom:14px}
+input{font:inherit; font-family:'IBM Plex Mono',ui-monospace,monospace; font-size:14px; color:var(--txt); background:var(--ink); border:1px solid var(--line); border-radius:10px; padding:11px 12px; width:100%}
+input:focus-visible,button:focus-visible,a:focus-visible{outline:2px solid var(--gold); outline-offset:2px}
+button{font:inherit; font-weight:700; width:100%; color:var(--ink); background:var(--txt); border:0; border-radius:10px; padding:11px; cursor:pointer}
+button:disabled{opacity:.5; cursor:default}
+.msg{min-height:1.5em; margin:12px 0 0; font-size:14px}
+.msg.bad{color:var(--bad)} .msg.ok{color:var(--ok)}
+.foot{margin-top:18px; font-size:13.5px; color:var(--dim)}
+.foot a{color:var(--gold)}
+</style>
+</head>
+<body>
+<main class="box">
+  <span class="tag">가상의 돈 · 실제 주문 아님</span>
+  <h1>모의 거래소에 들어가기</h1>
+  <p>계좌의 열쇠(<span style="font-family:'IBM Plex Mono',monospace">pxk_</span> 로 시작)를 넣으세요. 에이전트가 쓰는 열쇠와 같습니다. 이 주소에서만 쓰는 로그인입니다.</p>
+  <form id="f" novalidate>
+    <label for="key">열쇠<input id="key" type="password" autocomplete="current-password" spellcheck="false" autocapitalize="none" placeholder="pxk_…"></label>
+    <button type="submit" id="go">들어가기</button>
+    <p class="msg" id="m" role="status"></p>
+  </form>
+  <div class="foot">열쇠가 없으면 <a href="/apply">참가 원서</a>를 내세요. 주최자가 수락하면 열쇠를 받습니다.<br>열쇠를 잃었으면 주최자에게 새로 받으세요(예전 열쇠는 끊깁니다).</div>
+</main>
+<script>
+const m = document.getElementById('m');
+const say = (t, c) => { m.textContent = t; m.className = 'msg ' + (c || ''); };
+document.getElementById('f').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const key = document.getElementById('key').value.trim();
+  if (!/^pxk_[A-Za-z0-9]{32,64}$/.test(key)) return say('열쇠를 그대로 붙여 넣어 주세요 (pxk_ 로 시작합니다).', 'bad');
+  const go = document.getElementById('go'); go.disabled = true; say('확인하는 중입니다.');
+  try {
+    const r = await fetch('/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { go.disabled = false; return say(j.error || '들어가지 못했습니다.', 'bad'); }
+    say((j.name || '') + ' 계좌로 들어갑니다.', 'ok');
+    const next = new URLSearchParams(location.search).get('next') || '/';
+    location.href = /^\/(?!\/)[^\s]*$/.test(next) ? next : '/';
+  } catch (err) { go.disabled = false; say('들어가지 못했습니다. 잠시 뒤 다시 해 주세요.', 'bad'); }
+});
+</script>
+</body>
+</html>

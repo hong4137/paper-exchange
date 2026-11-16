@@ -143,8 +143,8 @@ r = await st('/api/me', 'st_session=boss');
 check('sharktalk 에 로그인한 관리자를 알아본다', r.status === 200 && r.data.admin === true && r.data.id === 'boss' && asked.at(-1) === 'https://auth.sharktalk.co.kr/me', JSON.stringify(r.data));
 check('sharktalk 에 로그인한 참가자는 자기 계좌만', (await st('/data/accounts/alice.json', 'st_session=alice')).status === 200 && (await st('/data/league.json', 'st_session=alice')).status === 403);
 r = await st('/admin.html', null);
-check('쿠키가 없으면 들이지 않고, 로그인 화면에 돌아올 주소를 실어 알려 준다', r.status === 401 && !String(r.data).includes('화면')
-      && String(r.data).includes('https://auth.sharktalk.co.kr/login?next=' + encodeURIComponent(site + '/admin.html')), String(r.data).slice(-200));
+check('쿠키가 없으면 들이지 않고, 거래소 자체 로그인 화면에 돌아올 주소를 실어 알려 준다', r.status === 401 && !String(r.data).includes('화면')
+      && String(r.data).includes('/login?next=' + encodeURIComponent('/admin.html')) && !String(r.data).includes('auth.sharktalk'), String(r.data).slice(-200));
 let n0 = asked.length;
 check('st_session 쿠키가 없으면 인증 워커에 묻지도 않는다', (await st('/api/me', 'other=boss')).status === 401 && asked.length === n0);
 check('인증 워커가 모르는 쿠키·로그인 안 됨 응답은 들이지 않는다', (await st('/api/me', 'st_session=nobody')).status === 401 && (await st('/api/me', 'st_session=out')).status === 401);
