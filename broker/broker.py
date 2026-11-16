@@ -1892,31 +1892,27 @@ def admin_do(cfg, req):
                 want = f"f{n}"
             if app.get("email") and any(str(p.get("email") or "").lower() == app["email"].lower() for p in players):
                 raise Refused("그 이메일은 이미 다른 계좌에 쓰이고 있습니다")
-            pw = app.get("password") if PW_RE.fullmatch(str(app.get("password") or "")) else None
             players.append({k: v for k, v in {"id": want, "name": app.get("name") or want, "agent": app.get("agent") or "에이전트",
-                                              "email": app.get("email"), "real_name": app.get("real_name"), "application": aid,
-                                              "password": pw, "password_at": pw and now().isoformat(timespec="seconds")}.items() if v})
+                                              "email": app.get("email"), "real_name": app.get("real_name"), "application": aid}.items() if v})
             app.update(status="approved", account=want, decided_at=now().isoformat(timespec="seconds"))
-            app.pop("password", None)                    # 비밀번호 지문은 명단으로만 옮기고 원서에서는 지운다
-            msg = (f"{app.get('real_name')} 님의 신청을 수락했습니다 — 계좌 `{want}` 가 열립니다. "
-                   + (f"아이디 `{want}` 와 원서에 적은 비밀번호로 들어옵니다" + ("" if want == app.get("want_id") else " (바란 아이디가 쓰이고 있어 바꿨습니다 — 알려 주세요)")
-                      if pw else "비밀번호가 없는 원서라 관리자 화면에서 비밀번호를 만들어 건네야 합니다"))
+            app.pop("password", None)                    # (예전 원서에 남은 지문이 있으면 지운다 — 비밀번호는 로그인 창고에만)
+            msg = (f"{app.get('real_name')} 님의 신청을 수락했습니다 — 계좌 `{want}` 가 열립니다. 아이디 `{want}` 와 원서에 적은 비밀번호로 들어옵니다"
+                   + ("" if want == app.get("want_id") else " (바란 아이디가 쓰이고 있어 바꿨습니다 — 비밀번호 새로 만들기로 임시 비밀번호를 건네세요)"))
         dst = HOME / "applications" / "done" / f"{aid}.json"
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_text(json.dumps(app, ensure_ascii=False, indent=1), encoding="utf-8")
         src.unlink()
         return msg
-    if act == "set_password":                         # 사람의 비밀번호 — 문지기가 PBKDF2 로 바꾼 값만 온다 (원문은 어디에도 없다)
-        pid = str(req.get("id") or "").strip().lower()
-        cur = next((p for p in cfg.get("players") or [] if str(p.get("id") or p.get("github") or "").lower() == pid), None)
-        if not cur:
-            raise Refused(f"`{pid}` 은(는) 명단에 없습니다")
-        pw = str(req.get("password") or "")
-        if not PW_RE.fullmatch(pw):
-            raise Refused("비밀번호 지문이 올바르지 않습니다")
-        cur["password"] = pw
-        cur["password_at"] = now().isoformat(timespec="seconds")
-        return f"`{pid}` 의 비밀번호를 바꿨습니다" + (" (임시 비밀번호)" if req.get("label") == "reset" else "")
+    if act == "set_password":                         # 비밀번호는 저장소에 두지 않는다 — 문지기의 로그인 창고(Cloudflare KV)에만 (사용자 2026-11-16)
+        raise Refused("비밀번호는 거래소 저장소에 두지 않습니다 (로그인 창고에서 바꿉니다)")
+    if act == "purge_secrets":                        # 로그인 창고로 옮긴 뒤 명단에 남은 비밀번호·열쇠 지문을 지운다 (site-deploy 가 옮긴 다음 올린다)
+        n = 0
+        for p in cfg.get("players") or []:
+            for k in ("password", "password_at", "api_keys"):
+                if k in p:
+                    p.pop(k)
+                    n += 1
+        return f"명단에서 로그인 지문 {n}칸을 지웠습니다 (로그인 창고로 옮김)" if n else "명단에 지울 로그인 지문이 없습니다"
     if act in ("set_key", "revoke_key"):               # 에이전트 열쇠 — 문지기가 만들어 주인에게 한 번만 보여 주고, 여기에는 지문(sha256)만 온다
         pid = str(req.get("id") or "").strip().lower()
         cur = next((p for p in cfg.get("players") or [] if str(p.get("id") or p.get("github") or "").lower() == pid), None)
@@ -1930,7 +1926,7 @@ def admin_do(cfg, req):
             raise Refused("열쇠 지문이 올바르지 않습니다")
         cur["api_keys"] = [{"hash": h, "created": now().isoformat(timespec="seconds"), "label": str(req.get("label") or "")[:40]}]
         return f"`{pid}` 의 에이전트 열쇠를 새로 달았습니다 (예전 열쇠는 끊김)"
-    raise Refused("모르는 관리 명령입니다 (add_player · remove_player · add_contest · remove_contest · set_key · revoke_key · set_password · approve_application · reject_application · clear_login)")
+    raise Refused("모르는 관리 명령입니다 (add_player · remove_player · add_contest · remove_contest · set_key · revoke_key · purge_secrets · approve_application · reject_application · clear_login)")
 
 
 def cmd_admin_issue(author, body):

@@ -109,7 +109,7 @@ export async function submitOrder(body, me, env, fetchFn = fetch, now = new Date
 const ADMIN_ACTIONS = { add_player: ['id', 'github', 'email', 'login', 'name', 'agent'], remove_player: ['id', 'github'],
                         add_contest: ['name', 'start', 'end'], remove_contest: ['name'],
                         approve_fork: ['account', 'fork'], reject_fork: ['account', 'fork', 'why'],
-                        set_key: ['id', 'hash', 'label'], revoke_key: ['id'], set_password: ['id', 'password', 'label'],
+                        set_key: ['id', 'hash', 'label'], revoke_key: ['id'], purge_secrets: [],
                         approve_application: ['id', 'account'], reject_application: ['id', 'why'], clear_login: ['id'] };
 
 /** 관리 명령을 자료 저장소의 admin/ 에 요청 파일로 올린다 (관리자만 부른다 — handle 이 확인한다). */
@@ -117,7 +117,7 @@ export async function submitAdmin(body, env, fetchFn = fetch, now = new Date()) 
   const keys = ADMIN_ACTIONS[body.action];
   if (!keys) return { ok: false, status: 400 };
   const req = { action: body.action };
-  for (const k of keys) if (typeof body[k] === 'string' && body[k].trim()) req[k] = body[k].trim().slice(0, k === 'password' ? 200 : 80);
+  for (const k of keys) if (typeof body[k] === 'string' && body[k].trim()) req[k] = body[k].trim().slice(0, 80);
   req.requested_at = now.toISOString();
   const stamp = now.toISOString().replace(/[-:.TZ]/g, '').slice(0, 17);
   const rand = Array.from(crypto.getRandomValues(new Uint8Array(4)), (b) => b.toString(16).padStart(2, '0')).join('');
@@ -155,12 +155,40 @@ export async function newAgentKey() {
   return { key, hash: await sha256hex(key) };
 }
 
-/** 열쇠로 계좌를 찾는다. 반환 {id, name} 또는 null. */
-export async function agentFromKey(request, cfg) {
+// ---------- 로그인 정보 창고 (Cloudflare KV, 묶음 이름 AUTH) ----------
+// 비밀번호 지문과 에이전트 열쇠 지문은 GitHub 저장소에 두지 않고 여기에만 둔다 (사용자 2026-11-16: "옮겨").
+// 이 워커만 읽고 쓴다 — 자료 저장소·자동 실행·선수의 GitHub 열쇠로는 보이지 않고, git 기록도 남지 않는다.
+//   pw:{이름표}   {hash, at, pending?: 원서 번호}   — pending 이면 그 원서로 열린 계좌(players[].application)에만 맞는다
+//   key:{지문}    {id, created, label}
+//   keys:{이름표} [지문, …]                          — 그 계좌의 지금 열쇠 (새로 만들면 예전 것은 지운다)
+// 자료 저장소 players.json 의 api_keys 는 뒷문으로만 읽는다 (주인이 비밀번호·열쇠를 다 잃었을 때 admin/ set_key 를 직접 올리는 길).
+const kvGet = async (env, k) => { if (!env.AUTH) return null; try { return JSON.parse((await env.AUTH.get(k)) || 'null'); } catch (e) { return null; } };
+const kvPut = async (env, k, v) => { if (!env.AUTH) throw new Error('로그인 창고(AUTH)가 없습니다'); await env.AUTH.put(k, JSON.stringify(v)); };
+const kvDel = async (env, k) => { if (env.AUTH) await env.AUTH.delete(k); };
+
+/** 그 계좌의 열쇠를 새로 만든다 — 예전 열쇠(창고·명단 둘 다)는 끊는다. 반환 평문 열쇠(한 번만 보여 줄 것). */
+async function setKey(env, cfg, id, label, fetchFn) {
+  const k = await newAgentKey();
+  for (const h of (await kvGet(env, `keys:${id}`)) || []) await kvDel(env, `key:${h}`);
+  await kvPut(env, `key:${k.hash}`, { id, created: new Date().toISOString(), label: String(label || '').slice(0, 40) });
+  await kvPut(env, `keys:${id}`, [k.hash]);
+  const p = (cfg.players || []).find((x) => accountId(x) === id);
+  if (p && (p.api_keys || []).length) await submitAdmin({ action: 'revoke_key', id }, env, fetchFn);   // 명단에 남은 예전 열쇠도 끊는다
+  return k.key;
+}
+async function revokeKeys(env, id) {
+  for (const h of (await kvGet(env, `keys:${id}`)) || []) await kvDel(env, `key:${h}`);
+  await kvDel(env, `keys:${id}`);
+}
+
+/** 열쇠로 계좌를 찾는다. 반환 {id, name, hash} 또는 null. */
+export async function agentFromKey(request, cfg, env = {}) {
   const m = /^Bearer\s+(\S+)$/.exec(request.headers.get('Authorization') || '');
   if (!m || !KEY_RE.test(m[1])) return null;
   const h = await sha256hex(m[1]);
-  const p = (cfg.players || []).find((x) => (x.api_keys || []).some((k) => k.hash === h) && validId(accountId(x)));
+  const rec = await kvGet(env, `key:${h}`);
+  let p = rec && (cfg.players || []).find((x) => accountId(x) === rec.id && validId(accountId(x)));
+  if (!p) p = (cfg.players || []).find((x) => (x.api_keys || []).some((k) => k.hash === h) && validId(accountId(x)));
   return p ? { id: accountId(p), name: p.name || accountId(p), hash: h } : null;
 }
 
@@ -258,7 +286,9 @@ async function handleApply(request, env, fetchFn, url) {
   const now = new Date();
   const stamp = now.toISOString().replace(/[-:.TZ]/g, '').slice(0, 17);
   const id = `ap-${stamp}-${Array.from(crypto.getRandomValues(new Uint8Array(4)), (x) => x.toString(16).padStart(2, '0')).join('')}`;
-  const rec = { id, ...Object.fromEntries(Object.entries(app).filter(([, v]) => v)), password: await hashPassword(pw), applied_at: now.toISOString(), status: 'pending' };
+  const rec = { id, ...Object.fromEntries(Object.entries(app).filter(([, v]) => v)), applied_at: now.toISOString(), status: 'pending' };
+  if (!env.AUTH) return json({ error: '지금은 원서를 받을 수 없습니다 (로그인 창고 없음). 주최자에게 알려 주세요.' }, 503);
+  await kvPut(env, `pw:${app.want_id}`, { hash: await hashPassword(pw), at: now.toISOString(), pending: id });   // 비밀번호 지문은 저장소가 아니라 창고에
   const r = await gh(env, `contents/applications/pending/${id}.json`, { method: 'PUT', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ message: `참가 신청 ${id}`, branch: branch(env), content: bytesToB64(te.encode(JSON.stringify(rec, null, 1))) }) }, fetchFn);
   if (!r.ok) return json({ error: '거래소에 전하지 못했습니다. 잠시 뒤 다시 해 주세요.' }, 502);
@@ -271,7 +301,7 @@ async function handleAgent(request, env, fetchFn, url) {
   if (path === '/api/v1/apply' || path.startsWith('/api/v1/apply/')) return handleApply(request, env, fetchFn, url);   // 예전 찾아가기 주소는 404
   let cfg;
   try { cfg = await loadConfig(env, fetchFn); } catch (e) { return json({ error: '거래소 자료를 읽지 못했습니다' }, 502); }
-  const ag = await agentFromKey(request, cfg);
+  const ag = await agentFromKey(request, cfg, env);
   if (!ag) return json({ error: '열쇠가 없거나 맞지 않습니다 (Authorization: Bearer pxk_…)' }, 401);
   const minute = Math.floor(Date.now() / 60000);
   const [m0, n0] = rate.get(ag.hash) || [minute, 0];
@@ -326,7 +356,7 @@ async function handleAgent(request, env, fetchFn, url) {
 }
 
 // ---------- 거래소 자체 로그인 (아이디·비밀번호) ----------
-// 아이디 = 계좌 이름표. 비밀번호는 PBKDF2-SHA256(10만 번, 소금 16바이트)으로 바꾼 값만 명단(players[].password)에 둔다 — 원문은 어디에도 남지 않는다.
+// 아이디 = 계좌 이름표. 비밀번호는 PBKDF2-SHA256(10만 번, 소금 16바이트)으로 바꾼 값만 로그인 창고(KV pw:{이름표})에 둔다 — 원문은 어디에도 남지 않는다.
 // 들어오면 거래소 주소에만 붙는 세션 쿠키(px_session, HttpOnly·Secure·SameSite=Lax, Domain 없음 — sharktalk 다른 서비스와 나누지 않는다)를 준다.
 // 쿠키 = base64url({id, k: 비밀번호 지문 끝 16자, exp}).서명 — 서명 열쇠는 GITHUB_TOKEN 에서 끌어낸 HMAC (새 비밀값이 필요 없다).
 // 비밀번호가 바뀌면 그 세션은 끝난다. 관리자 = 주인 계좌("main")로 들어온 사람.
@@ -395,14 +425,24 @@ export async function readSession(request, env, now = Date.now()) {
   } catch (e) { return null; }
 }
 
+/** 그 계좌의 비밀번호 기록 — 원서 시절 것이면 그 원서로 열린 계좌에만 맞는다. */
+async function pwOf(env, p) {
+  const r = await kvGet(env, `pw:${accountId(p)}`);
+  if (!r || !r.hash) return null;
+  if (r.pending && p.application !== r.pending) return null;
+  return r;
+}
+
 /** 세션 → 거래소 사람. 비밀번호(또는 들어올 때 쓴 열쇠)가 바뀌었으면 null. */
-function meFromSession(sess, cfg) {
+async function meFromSession(sess, cfg, env) {
   const p = (cfg.players || []).find((x) => accountId(x) === sess.id && validId(accountId(x)));
   if (!p) return null;
-  const ok = (p.password && pwTag(p.password) === sess.k) || (p.api_keys || []).some((k) => String(k.hash).startsWith(sess.k));
+  const pw = await pwOf(env, p);
+  const keys = [...((await kvGet(env, `keys:${sess.id}`)) || []), ...(p.api_keys || []).map((k) => String(k.hash))];
+  const ok = (pw && pwTag(pw.hash) === sess.k) || keys.some((h) => h.startsWith(sess.k));
   if (!ok) return null;
   return { email: null, login: null, admin: !!p.main, id: accountId(p), name: p.name || accountId(p), main: !!p.main,
-           has_password: !!p.password, has_key: !!(p.api_keys || []).length };
+           has_password: !!pw, has_key: keys.length > 0 };
 }
 
 const cookie = (val, maxAge) => `${SESSION}=${val}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}`;
@@ -428,7 +468,7 @@ async function handleLogin(request, env, fetchFn, url) {
   if (typeof body.key === 'string' && body.key.trim()) {
     const key = body.key.trim();
     if (!KEY_RE.test(key)) return json({ error: '열쇠 모양이 아닙니다 (pxk_ 로 시작합니다)' }, 400);
-    const ag = await agentFromKey(new Request(url, { headers: { Authorization: `Bearer ${key}` } }), cfg);
+    const ag = await agentFromKey(new Request(url, { headers: { Authorization: `Bearer ${key}` } }), cfg, env);
     if (!ag) return json({ error: '맞는 열쇠가 아닙니다' }, 401);
     return withCookie({ ok: true, id: ag.id, name: ag.name }, await makeSession(env, ag.id, ag.hash));
   }
@@ -436,11 +476,13 @@ async function handleLogin(request, env, fetchFn, url) {
   const pw = typeof body.password === 'string' ? body.password : '';
   if (!id || !pw) return json({ error: '아이디와 비밀번호를 넣어 주세요' }, 400);
   const p = (cfg.players || []).find((x) => accountId(x) === id && validId(accountId(x)));
-  if (p && p.password && await checkPassword(pw, p.password))
-    return withCookie({ ok: true, id, name: p.name || id }, await makeSession(env, id, pwTag(p.password)));
+  const rec = p && await pwOf(env, p);
+  if (rec && await checkPassword(pw, rec.hash))
+    return withCookie({ ok: true, id, name: p.name || id }, await makeSession(env, id, pwTag(rec.hash)));
   if (!p) {                                               // 아직 수락 전인 원서인지 알려 준다 (비밀번호가 맞을 때만)
-    const a = (await pendingApps(env, fetchFn)).find((x) => x.want_id === id);
-    if (a && await checkPassword(pw, a.password)) return json({ error: '주최자가 아직 원서를 수락하지 않았습니다. 수락되면 이 아이디와 비밀번호로 들어올 수 있습니다.' }, 403);
+    const r = await kvGet(env, `pw:${id}`);
+    if (r && r.pending && await checkPassword(pw, r.hash) && (await readJsonFile(env, `applications/pending/${r.pending}.json`, fetchFn).catch(() => null)))
+      return json({ error: '주최자가 아직 원서를 수락하지 않았습니다. 수락되면 이 아이디와 비밀번호로 들어올 수 있습니다.' }, 403);
   }
   return json({ error: '아이디나 비밀번호가 맞지 않습니다' }, 401);
 }
@@ -480,7 +522,7 @@ export async function handle(request, env, next, fetchFn = fetch) {
   try { cfg = await loadConfig(env, fetchFn); } catch (e) {
     return api ? json({ error: '거래소 자료를 읽지 못했습니다' }, 502) : deny(502, '거래소 자료를 읽지 못했습니다. 잠시 뒤 다시 열어 주세요.');
   }
-  const me = meFromSession(sess, cfg);
+  const me = await meFromSession(sess, cfg, env);
   if (!me) return needLogin();                            // 열쇠가 바뀌었거나 끊겼다
 
   if (path === '/api/me') return json({ id: me.id, name: me.name, admin: me.admin, has_password: me.has_password, has_key: me.has_key });
@@ -491,23 +533,19 @@ export async function handle(request, env, next, fetchFn = fetch) {
     const body = (await readBody(request)) || {};
     if (path === '/api/password') {
       const p = (cfg.players || []).find((x) => accountId(x) === me.id);
-      if (p && p.password && !(await checkPassword(String(body.current || ''), p.password))) return json({ error: '지금 비밀번호가 맞지 않습니다' }, 403);
+      const cur = await pwOf(env, p);
+      if (cur && !(await checkPassword(String(body.current || ''), cur.hash))) return json({ error: '지금 비밀번호가 맞지 않습니다' }, 403);
       const bad = pwProblem(body.password);
       if (bad) return json({ error: bad }, 400);
       const hashed = await hashPassword(body.password);
-      const r = await submitAdmin({ action: 'set_password', id: me.id, password: hashed }, env, fetchFn);
-      if (!r.ok) return json({ error: '거래소에 전하지 못했습니다' }, 502);
-      cfgCache = { at: 0, cfg: null };
-      // 비밀번호가 있던 계좌는 명단이 바뀌는 순간(1~2분 뒤) 지금 세션이 끝난다 — 화면이 새 비밀번호로 다시 들어오라고 안내한다
-      return json({ ok: true, relogin: !!(p && p.password),
-                    message: p && p.password ? '비밀번호를 바꿨습니다. 1~2분 뒤 새 비밀번호로 다시 들어와 주세요.'
-                                             : '비밀번호를 정했습니다. 1~2분 뒤부터 아이디 ' + me.id + ' 와 이 비밀번호로 들어옵니다.' });
+      try { await kvPut(env, `pw:${me.id}`, { hash: hashed, at: new Date().toISOString() }); } catch (e) { return json({ error: '비밀번호를 저장하지 못했습니다' }, 503); }
+      // 새 비밀번호의 세션을 바로 준다 — 예전 세션은 끝난다
+      return withCookie({ ok: true, message: cur ? '비밀번호를 바꿨습니다.' : `비밀번호를 정했습니다. 다음부터 아이디 ${me.id} 와 이 비밀번호로 들어옵니다.` },
+                        await makeSession(env, me.id, pwTag(hashed)));
     }
-    const k = await newAgentKey();
-    const r = await submitAdmin({ action: 'set_key', id: me.id, hash: k.hash, label: '내 설정' }, env, fetchFn);
-    if (!r.ok) return json({ error: '거래소에 전하지 못했습니다' }, 502);
-    cfgCache = { at: 0, cfg: null };
-    return json({ ok: true, key: k.key, account: me.id, message: '에이전트 열쇠입니다. 지금 한 번만 보여 줍니다. 1~2분 뒤부터 쓸 수 있고, 예전 열쇠는 끊깁니다.' });
+    let key;
+    try { key = await setKey(env, cfg, me.id, '내 설정', fetchFn); } catch (e) { return json({ error: '열쇠를 저장하지 못했습니다' }, 503); }
+    return json({ ok: true, key, account: me.id, message: '에이전트 열쇠입니다. 지금 한 번만 보여 줍니다. 바로 쓸 수 있고(늦어도 1분), 예전 열쇠는 끊깁니다.' });
   }
 
   if (path === '/api/order' || path === '/api/admin') {
@@ -520,21 +558,26 @@ export async function handle(request, env, next, fetchFn = fetch) {
       if (body.action === 'reset_password') {             // 임시 비밀번호 — 주인에게 한 번만 보여 주고, 거래소에는 지문만 간다
         const id = String(body.id || '').trim().toLowerCase();
         if (!validId(id)) return json({ error: '이름표를 적어 주세요' }, 400);
+        if (!(cfg.players || []).some((x) => accountId(x) === id)) return json({ error: `${id} 은(는) 명단에 없습니다` }, 400);
         const pw = tempPassword();
-        const r = await submitAdmin({ action: 'set_password', id, password: await hashPassword(pw), label: 'reset' }, env, fetchFn);
-        if (!r.ok) return json({ error: '거래소에 전하지 못했습니다' }, 502);
-        cfgCache = { at: 0, cfg: null };
-        return json({ ok: true, password: pw, message: `${id} 의 임시 비밀번호입니다. 지금 한 번만 보여 줍니다. 1~2분 뒤부터 아이디 ${id} 와 이 비밀번호로 들어오고, 들어와서 "내 설정"에서 바꾸면 됩니다.` });
+        try { await kvPut(env, `pw:${id}`, { hash: await hashPassword(pw), at: new Date().toISOString(), reset: true }); } catch (e) { return json({ error: '비밀번호를 저장하지 못했습니다' }, 503); }
+        return json({ ok: true, password: pw, message: `${id} 의 임시 비밀번호입니다. 지금 한 번만 보여 줍니다. 바로(늦어도 1분) 아이디 ${id} 와 이 비밀번호로 들어오고, 들어와서 "내 설정"에서 바꾸면 됩니다.` });
       }
       if (body.action === 'set_password') return json({ error: '비밀번호는 "비밀번호 새로 만들기"로 바꿉니다' }, 400);
       if (body.action === 'issue_key') {                  // 열쇠는 여기서 만들어 주인에게 한 번만 보여 준다 — 거래소에는 지문만 간다
         const id = String(body.id || '').trim().toLowerCase();
         if (!validId(id)) return json({ error: '이름표를 적어 주세요' }, 400);
-        const k = await newAgentKey();
-        const r = await submitAdmin({ action: 'set_key', id, hash: k.hash, label: String(body.label || '') }, env, fetchFn);
-        if (!r.ok) return json({ error: '거래소에 전하지 못했습니다' }, 502);
-        cfgCache = { at: 0, cfg: null };
-        return json({ ok: true, key: k.key, message: `${id} 의 열쇠입니다. 지금 한 번만 보여 줍니다 — 복사해 두세요. 1~2분 뒤부터 쓸 수 있고, 예전 열쇠는 끊깁니다.` });
+        if (!(cfg.players || []).some((x) => accountId(x) === id)) return json({ error: `${id} 은(는) 명단에 없습니다` }, 400);
+        let key;
+        try { key = await setKey(env, cfg, id, String(body.label || ''), fetchFn); } catch (e) { return json({ error: '열쇠를 저장하지 못했습니다' }, 503); }
+        return json({ ok: true, key, message: `${id} 의 열쇠입니다. 지금 한 번만 보여 줍니다 — 복사해 두세요. 바로(늦어도 1분) 쓸 수 있고, 예전 열쇠는 끊깁니다.` });
+      }
+      if (body.action === 'revoke_key') {                 // 창고의 열쇠를 지우고, 명단에 남은 것(뒷문)도 끊는다
+        const id = String(body.id || '').trim().toLowerCase();
+        if (!validId(id)) return json({ error: '이름표를 적어 주세요' }, 400);
+        await revokeKeys(env, id);
+        await submitAdmin({ action: 'revoke_key', id }, env, fetchFn);
+        return json({ ok: true, message: `${id} 의 에이전트 열쇠를 끊었습니다.` });
       }
       const r = await submitAdmin(body, env, fetchFn);
       if (r.ok) cfgCache = { at: 0, cfg: null };               // 명단이 곧 바뀐다 — 다음 요청 때 다시 읽는다

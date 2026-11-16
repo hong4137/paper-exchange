@@ -232,7 +232,7 @@ r2 = next(p for p in roster() if p.get("application") == A2)
 done = {a: json.loads((tmp / "applications" / "done" / f"{a}.json").read_text(encoding="utf-8")) for a in (A1, A2, A3)}
 check("수락: 바라는 이름표로 계좌가 열리고 실명이 명단에", r1["id"] == "dolsoe" and r1["real_name"] == "김철수" and r1["agent"] == "돌쇠봇"
       and (tmp / "accounts" / "dolsoe" / "ledger.jsonl").exists() and done[A1]["status"] == "approved" and done[A1]["account"] == "dolsoe", r1)
-check("수락: 원서의 비밀번호 지문이 명단으로 옮겨지고 원서에서는 지워진다", r1.get("password") == PW and "password" not in done[A1] and "password" not in r2, (r1, done[A1]))
+check("수락: 예전 원서에 남은 비밀번호 지문은 명단으로 옮기지 않고 원서에서도 지운다", "password" not in r1 and "password" not in done[A1] and "password" not in r2, (r1, done[A1]))
 check("바라는 이름표가 이미 있으면 f번호로", r2["id"] == "f1" and done[A2]["account"] == "f1", r2)
 check("거절: rejected + 사유, 계좌 없음", done[A3]["status"] == "rejected" and done[A3]["why"] == "다음 기회에" and not any(p.get("application") == A3 for p in roster()))
 check("같은 신청을 두 번 정하지 않는다, 처리한 신청은 기다리는 칸에서 빠진다", log[-1]["ok"] is False and not list(pend.glob("*.json")), log[-1])
@@ -240,15 +240,18 @@ run("2026-11-19T17:12:00", "build")
 blob = (tmp / "docs" / "data" / "accounts" / "dolsoe.json").read_text(encoding="utf-8") + (tmp / "docs" / "data" / "state.json").read_text(encoding="utf-8")
 check("실명은 계좌 화면 자료에 실리지 않는다 (관리자 자료에만)", "김철수" not in blob and next(r for r in league()["players"] if r["id"] == "dolsoe")["real_name"] == "김철수")
 
-PW2 = PW.replace("H", "G")
-put("admin", "w1", {"action": "set_password", "id": "dolsoe", "password": PW2})
-put("admin", "w2", {"action": "set_password", "id": "dolsoe", "password": "plain-text"})
-put("admin", "w3", {"action": "set_password", "id": "nobody", "password": PW2})
+put("admin", "w1", {"action": "set_password", "id": "dolsoe", "password": PW.replace("H", "G")})
+put("admin", "k9", {"action": "set_key", "id": "dolsoe", "hash": "ab" * 32})
 run("2026-11-19T17:12:30", "admin-inbox")
+put("admin", "w2", {"action": "purge_secrets"})
+put("admin", "w3", {"action": "purge_secrets"})
+run("2026-11-19T17:12:35", "admin-inbox")
 run("2026-11-19T17:12:40", "build")
 log = json.loads((tmp / "docs" / "data" / "admin_log.json").read_text(encoding="utf-8"))
-check("비밀번호 바꾸기: 지문 모양만, 명단에 있는 계좌만", next(p for p in roster() if p.get("id") == "dolsoe")["password"] == PW2
-      and [x["ok"] for x in log[-3:]] == [True, False, False], log[-3:])
+d = next(p for p in roster() if p.get("id") == "dolsoe")
+check("비밀번호는 저장소에 두지 않는다, 지우기는 비밀번호·열쇠 지문을 다 지우고 두 번째는 할 것 없음",
+      log[-4]["ok"] and not log[-3]["ok"] and log[-2]["ok"] and "지웠습니다" in log[-2]["text"] and "없습니다" in log[-1]["text"]
+      and not any(k in d for k in ("password", "password_at", "api_keys")), (log[-4:], d))
 blob = "".join(f.read_text(encoding="utf-8") for f in (tmp / "docs" / "data").rglob("*.json"))
 check("비밀번호 지문은 어떤 화면 자료에도 실리지 않는다", "pbkdf2" not in blob)
 
