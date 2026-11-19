@@ -337,7 +337,8 @@ function renderLeague(){
         <td class="num c3">${x.from} ~ ${x.to}${x.late?' · 늦게 들어옴':''}</td></tr>`).join('')}
     </tbody></table></div>`:`<div class="empty">아직 시작하지 않았습니다.</div>`}`).join('');
   $('#league').innerHTML=`<section class="league"><h2>전체 계좌 수익률 <small>${L.players.length}계좌 · 같은 시작 금액 ${won(L.initial)}원 · 수익률 높은 순</small></h2>
-    <p class="sub">이름을 누르면 그 계좌의 화면(성적·보유 종목·주문 전표)이 열립니다. 기간을 바꾸면 그 기간의 수익률로 다시 줄을 세웁니다. 계좌가 그 기간보다 젊으면 빈칸입니다.</p>
+    <p class="sub">이름을 누르면 그 계좌의 화면(성적·보유 종목·주문 전표)이 열립니다. 기간을 바꾸면 그 기간의 수익률로 다시 줄을 세웁니다. 계좌가 그 기간보다 젊으면 빈칸입니다.<br>
+    <b>비교 기준보다</b> = 그 계좌 수익률 − 비교 기준 수익률(%p, 퍼센트포인트). 비교 기준은 계좌를 연 날 시작 금액을 ${(L.benchmark||[]).map(b=>esc(b.label)).join('·')||'비교 기준 종목'}에 반씩 사서 그대로 뒀다면의 수익률입니다(원화로 환산, 수수료·환전 비용·배당 없음 — 계좌마다 연 날이 다르면 기준도 그날부터). <b>낸 비용</b> = 계좌를 연 뒤 지금까지 낸 수수료 + 세금·제비용 + 환전 비용(원화로 환산).</p>
     ${chips.length>1?`<div class="chips">${chips.map(k=>`<button class="chip pd ${period===k.key?'on':''}" data-p="${k.key}">${k.label}</button>`).join('')}</div>`:''}
     <div class="tblwrap"><table><thead><tr><th>순서</th><th>계좌</th><th>수익률</th><th>총자산</th><th class="c3">비교 기준보다</th><th class="c3">최대 낙폭</th><th class="c3">보유</th><th class="c3">주문</th><th class="c3">낸 비용</th><th class="c3">연 날</th><th class="c3">흐름</th></tr></thead><tbody>
     ${rows.map(({p,r,rank})=>`<tr class="${p.id===cur?'me':''}">

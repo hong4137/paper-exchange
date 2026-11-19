@@ -324,7 +324,8 @@ def build_league():
     for r in rows:
         del r["_equity"], r["_initial"], r["_forks"]
     out = {"name": (cfg.get("league") or {}).get("name") or "모의 거래소", "updated": now().isoformat(timespec="seconds"),
-           "initial": cfg["initial_cash"], "periods": [{"key": k, "label": l} for k, l, _ in PERIODS] + [{"key": "ytd", "label": "올해"}, {"key": "all", "label": "처음부터"}],
+           "initial": cfg["initial_cash"], "benchmark": [{"symbol": b["symbol"], "label": b.get("label", b["symbol"])} for b in cfg["benchmark"]],
+           "periods": [{"key": k, "label": l} for k, l, _ in PERIODS] + [{"key": "ytd", "label": "올해"}, {"key": "all", "label": "처음부터"}],
            "players": rows, "contests": contests, "families": families, "fork_requests": requests,
            "fork_max_accounts": _fork_limit(cfg), "applications": _applications()}
     LEAGUE_OUT.parent.mkdir(parents=True, exist_ok=True)
